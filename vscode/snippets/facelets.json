@@ -1,0 +1,150 @@
+{
+  "Facelets page": {
+    "prefix": "facelets",
+    "description": "Facelets page (Jakarta Faces 4)",
+    "body": [
+      "<!DOCTYPE html>",
+      "<html xmlns=\"http://www.w3.org/1999/xhtml\"",
+      "      xmlns:h=\"jakarta.faces.html\"",
+      "      xmlns:f=\"jakarta.faces.core\"",
+      "      xmlns:ui=\"jakarta.faces.facelets\">",
+      "<h:head>",
+      "    <title>${1:Title}</title>",
+      "</h:head>",
+      "<h:body>",
+      "    $0",
+      "</h:body>",
+      "</html>"
+    ]
+  },
+  "Facelets template client": {
+    "prefix": "uicomposition",
+    "description": "ui:composition using a template",
+    "body": [
+      "<ui:composition xmlns=\"http://www.w3.org/1999/xhtml\"",
+      "                xmlns:h=\"jakarta.faces.html\"",
+      "                xmlns:f=\"jakarta.faces.core\"",
+      "                xmlns:ui=\"jakarta.faces.facelets\"",
+      "                template=\"${1:/WEB-INF/templates/layout.xhtml}\">",
+      "    <ui:define name=\"${2:content}\">",
+      "        $0",
+      "    </ui:define>",
+      "</ui:composition>"
+    ]
+  },
+  "Composite component": {
+    "prefix": "composite",
+    "description": "Composite component with interface and implementation",
+    "body": [
+      "<ui:component xmlns=\"http://www.w3.org/1999/xhtml\"",
+      "              xmlns:h=\"jakarta.faces.html\"",
+      "              xmlns:ui=\"jakarta.faces.facelets\"",
+      "              xmlns:cc=\"jakarta.faces.composite\">",
+      "    <cc:interface>",
+      "        <cc:attribute name=\"${1:value}\" required=\"${2:true}\"/>",
+      "    </cc:interface>",
+      "    <cc:implementation>",
+      "        $0",
+      "    </cc:implementation>",
+      "</ui:component>"
+    ]
+  },
+  "Composite attribute": {
+    "prefix": "ccattr",
+    "description": "cc:attribute",
+    "body": [
+      "<cc:attribute name=\"${1:name}\" type=\"${2:java.lang.String}\" required=\"${3:false}\"/>"
+    ]
+  },
+  "ui:define": {
+    "prefix": "uidefine",
+    "description": "ui:define",
+    "body": [
+      "<ui:define name=\"${1:content}\">",
+      "    $0",
+      "</ui:define>"
+    ]
+  },
+  "ui:insert": {
+    "prefix": "uiinsert",
+    "description": "ui:insert",
+    "body": [
+      "<ui:insert name=\"${1:content}\">$0</ui:insert>"
+    ]
+  },
+  "ui:include": {
+    "prefix": "uiinclude",
+    "description": "ui:include",
+    "body": [
+      "<ui:include src=\"${1:/WEB-INF/includes/part.xhtml}\"/>"
+    ]
+  },
+  "ui:repeat": {
+    "prefix": "uirepeat",
+    "description": "ui:repeat over a collection",
+    "body": [
+      "<ui:repeat value=\"#{${1:bean.items}}\" var=\"${2:item}\">",
+      "    $0",
+      "</ui:repeat>"
+    ]
+  },
+  "h:form": {
+    "prefix": "hform",
+    "description": "h:form",
+    "body": [
+      "<h:form id=\"${1:form}\">",
+      "    $0",
+      "</h:form>"
+    ]
+  },
+  "h:dataTable": {
+    "prefix": "hdatatable",
+    "description": "h:dataTable with one column",
+    "body": [
+      "<h:dataTable value=\"#{${1:bean.items}}\" var=\"${2:item}\">",
+      "    <h:column>",
+      "        <f:facet name=\"header\">${3:Name}</f:facet>",
+      "        #{${2:item}.${4:name}}",
+      "    </h:column>",
+      "</h:dataTable>"
+    ]
+  },
+  "h:commandButton": {
+    "prefix": "hcommandbutton",
+    "description": "h:commandButton with action",
+    "body": [
+      "<h:commandButton value=\"${1:Save}\" action=\"#{${2:bean.save}}\"/>"
+    ]
+  },
+  "h:inputText": {
+    "prefix": "hinputtext",
+    "description": "h:inputText bound to a property",
+    "body": [
+      "<h:inputText id=\"${1:name}\" value=\"#{${2:bean.name}}\"${3: required=\"true\"}/>"
+    ]
+  },
+  "f:ajax": {
+    "prefix": "fajax",
+    "description": "f:ajax",
+    "body": [
+      "<f:ajax execute=\"${1:@this}\" render=\"${2:@form}\"${3: listener=\"#{${4:bean.changed}}\"}/>"
+    ]
+  },
+  "f:metadata": {
+    "prefix": "fmetadata",
+    "description": "f:metadata with view parameter and action",
+    "body": [
+      "<f:metadata>",
+      "    <f:viewParam name=\"${1:id}\" value=\"#{${2:bean.id}}\"/>",
+      "    <f:viewAction action=\"#{${3:bean.load}}\"/>",
+      "</f:metadata>"
+    ]
+  },
+  "EL deferred": {
+    "prefix": "#",
+    "description": "Deferred EL expression",
+    "body": [
+      "#{${1}}"
+    ]
+  }
+}

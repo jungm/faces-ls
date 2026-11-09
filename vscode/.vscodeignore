@@ -1,0 +1,11 @@
+**
+!package.json
+!README.md
+!LICENSE
+!NOTICE-taglibs.md
+!language-configuration.json
+!dist/extension.js
+!syntaxes/**
+!snippets/**
+!server/faces-ls.jar
+!server/faces-jdt.jar

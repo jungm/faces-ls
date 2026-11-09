@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Facelets",
+  "scopeName": "text.html.facelets",
+  "comment": "HTML markup with EL injected into attribute values, text, <script> and <style>; in attribute values the closing quote also ends an unterminated expression.",
+  "patterns": [
+    {
+      "include": "text.html.basic"
+    }
+  ],
+  "injections": {
+    "L:string.quoted.double.html -source.el": {
+      "patterns": [
+        {
+          "include": "source.el#escape"
+        },
+        {
+          "include": "source.el#expression-in-double-quotes"
+        }
+      ]
+    },
+    "L:string.quoted.single.html -source.el": {
+      "patterns": [
+        {
+          "include": "source.el#escape"
+        },
+        {
+          "include": "source.el#expression-in-single-quotes"
+        }
+      ]
+    },
+    "L:text.html.facelets -comment -string.quoted.double.html -string.quoted.single.html -source.el": {
+      "patterns": [
+        {
+          "include": "source.el"
+        }
+      ]
+    }
+  }
+}

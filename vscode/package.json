@@ -1,0 +1,196 @@
+{
+  "name": "faces",
+  "displayName": "Faces for Jakarta\u00ae EE",
+  "description": "Support for Jakarta\u00ae Faces: Facelets pages, Expression Language and Java integration, powered by the Faces Language Server.",
+  "version": "0.1.0",
+  "publisher": "jungm",
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Markus Jung",
+    "email": "jungm@apache.org"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jungm/vscode-faces"
+  },
+  "bugs": {
+    "url": "https://github.com/jungm/vscode-faces/issues"
+  },
+  "engines": {
+    "vscode": "^1.105.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Linters"
+  ],
+  "keywords": [
+    "facelets",
+    "faces",
+    "jakarta ee",
+    "expression language",
+    "xhtml"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "facelets",
+        "aliases": [
+          "Facelets",
+          "facelets"
+        ],
+        "extensions": [
+          ".xhtml"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "facelets",
+        "scopeName": "text.html.facelets",
+        "path": "./syntaxes/facelets.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.js": "javascript",
+          "source.css": "css"
+        }
+      },
+      {
+        "scopeName": "source.el",
+        "path": "./syntaxes/el.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "facelets",
+        "path": "./snippets/facelets.json"
+      }
+    ],
+    "javaExtensions": [
+      "./server/faces-jdt.jar"
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "facelets",
+        "scopes": {
+          "variable.static": [
+            "entity.name.type.el"
+          ],
+          "variable.defaultLibrary": [
+            "support.variable.el"
+          ],
+          "variable.declaration": [
+            "entity.name.tag.id.el"
+          ],
+          "class": [
+            "entity.name.type.class.el"
+          ]
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "faces.restartServer",
+        "title": "Restart Language Server",
+        "category": "Faces"
+      },
+      {
+        "command": "faces.showOutput",
+        "title": "Show Language Server Output",
+        "category": "Faces"
+      }
+    ],
+    "configuration": {
+      "title": "Faces",
+      "properties": {
+        "faces.java.home": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "JDK 21 or newer that runs the language server. When unset, `JAVA_HOME`, the runtime bundled with the Red Hat Java extension and `java` on `PATH` are tried in that order."
+        },
+        "faces.server.jar": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "Path to a `faces-ls.jar` to use instead of the bundled one, e.g. a local build of faces-language-server."
+        },
+        "faces.server.vmargs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "-XX:+UseSerialGC",
+            "-Xss2m"
+          ],
+          "scope": "machine-overridable",
+          "description": "JVM arguments for the language server."
+        },
+        "faces.server.logFile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "machine-overridable",
+          "markdownDescription": "Write a debug log of the language server to this file. Takes effect after a restart."
+        },
+        "faces.namespaces": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "markdownDescription": "Predefined namespace prefixes, e.g. `{\"o\": [\"omnifaces\", \"http://omnifaces.org/ui\"]}`. Tags and functions of an undeclared predefined prefix are completed and its `xmlns` declaration is added. A list means \"first one available\", an empty string removes a built-in prefix (`h`, `f`, `ui`, `cc`, `c`, `fn`, `pt`, `jsf`, `p`)."
+        },
+        "faces.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "server": "node scripts/copy-server.mjs",
+    "check-types": "tsc --noEmit",
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "npm run check-types && node esbuild.mjs --production",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.105.0",
+    "@vscode/vsce": "4.1.0",
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  }
+}
