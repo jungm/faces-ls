@@ -40,7 +40,7 @@ highlighting.
 | `variable` + `defaultLibrary` | implicit objects (`facesContext`, `param`, ...), `cc` |
 | `parameter` | lambda parameters (`+ declaration` where declared) |
 | `property`, `method` | bean properties (`+ readonly` without setter) and methods, `+ deprecated` as in Java |
-| `class`, `enumMember` | `f:importConstants` classes and their enum constants (other constants: `property + static + readonly`) |
+| `class`, `enumMember` | classes imported with `f:importConstants` and the like, and their enum constants (other constants: `property + static + readonly`) |
 | `namespace`, `function` | taglib functions (`fn:length`; `+ defaultLibrary` for standard libraries); tag prefixes |
 | `class` | composite component tag names |
 | `variable` + `declaration` | component ids and `widgetVar` names; ids in `render`/`update`/`for` are `variable` |
@@ -54,6 +54,7 @@ Pass settings as initialization options, or with `workspace/didChangeConfigurati
 | Setting | Meaning |
 |---|---|
 | `namespaces` | Predefined prefixes, e.g. `{"p": "primefaces", "o": ["omnifaces", "http://omnifaces.org/ui"]}`. Tags and functions of an undeclared predefined prefix are completed and its `xmlns` declaration added. Built in: `h`, `f`, `ui`, `cc`, `c`, `fn`, `pt`, `jsf`, `p`. An empty string removes one. |
+| `imports` | Tags that import a Java class into EL, by namespace URI and tag name, e.g. `{"http://example.org/ui": {"importEnum": "enum"}}`. The tag takes the class in `type` and the EL name in `var` (default: the simple class name). `constants` exposes static fields, `enum` enum constants plus `ALL_VALUES`, `functions` static methods as `var:method(...)`. Built in: `f:importConstants`, `p:importConstants`, `p:importEnum`, `o:importConstants`, `o:importFunctions`. An empty string or `null` removes one. |
 | `log_file` | Write a debug log to this file. |
 | `jdt_rendezvous` | Directory where faces-jdt announces itself, when the jars are not next to each other. |
 

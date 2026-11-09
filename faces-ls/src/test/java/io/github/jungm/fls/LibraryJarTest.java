@@ -35,6 +35,7 @@ class LibraryJarTest {
                   xmlns:s="http://example.org/shared" xmlns:sc="jakarta.faces.composite/shared">
               <h:outputText value="#{labels['order.title']} #{s:upper('x')}"/>
               <s:price amount="1"/>
+              <ui:include xmlns:ui="jakarta.faces.facelets" src="/shared-debug/debug.xhtml"/>
               <sc:price />
               <s:
             </html>
@@ -48,6 +49,7 @@ class LibraryJarTest {
                           <base-name>org.example.labels</base-name><var>labels</var>
                         </resource-bundle></application></faces-config>""",
                 "org/example/labels.properties", "order.title=Your order\n",
+                "META-INF/resources/shared-debug/debug.xhtml", "<ui:composition xmlns:ui=\"jakarta.faces.facelets\"/>",
                 "META-INF/shared.taglib.xml", """
                         <facelet-taglib><namespace>http://example.org/shared</namespace>
                           <composite-library-name>shared</composite-library-name>
@@ -99,6 +101,16 @@ class LibraryJarTest {
     }
 
     @Test
+    void completesViewPathsFromTheJar() throws Exception {
+        ElAnalyzer analyzer = analyzer(PAGE);
+        int offset = PAGE.indexOf("/shared-debug");
+        List<String> paths = new CompletionProvider(analyzer, io.github.jungm.fls.FacesSettings.defaults()).complete(offset)
+                .stream().map(CompletionItem::getLabel).toList();
+        assertTrue(paths.contains("/shared-debug/debug.xhtml"), paths.toString());
+        assertTrue(paths.contains("/order.xhtml"), paths.toString());
+    }
+
+    @Test
     void navigatesIntoExtractedJarEntries() throws Exception {
         ElAnalyzer analyzer = analyzer(PAGE);
         DefinitionProvider definitions = new DefinitionProvider(analyzer, uri -> null);
@@ -106,6 +118,10 @@ class LibraryJarTest {
         assertEquals(1, tag.size());
         assertTrue(tag.get(0).getUri().endsWith("META-INF/resources/shared/price.xhtml"), tag.toString());
         assertTrue(Files.exists(Path.of(java.net.URI.create(tag.get(0).getUri()))));
+        List<Location> include = definitions.definition(PAGE.indexOf("/shared-debug") + 3);
+        assertEquals(1, include.size(), include.toString());
+        assertTrue(include.get(0).getUri().endsWith("META-INF/resources/shared-debug/debug.xhtml"), include.toString());
+        assertTrue(Files.exists(Path.of(java.net.URI.create(include.get(0).getUri()))));
         List<Location> key = definitions.definition(PAGE.indexOf("order.title") + 2);
         assertEquals(1, key.size());
         assertTrue(key.get(0).getUri().endsWith("org/example/labels.properties"), key.toString());

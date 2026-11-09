@@ -2,6 +2,7 @@ package io.github.jungm.fls.features;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -20,8 +21,10 @@ import io.github.jungm.fls.analysis.ElType;
 import io.github.jungm.fls.analysis.ElVariable;
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
+import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.el.ElNode;
 import io.github.jungm.fls.el.ElParser;
+import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
@@ -266,7 +269,16 @@ public final class CompletionProvider {
         boolean facelets = Namespaces.FACELETS.equals(namespace);
         if (facelets && ((local.equals("include") && name.equals("src"))
                 || ((local.equals("composition") || local.equals("decorate")) && name.equals("template")))) {
-            for (String path : analyzer.project().viewPaths()) {
+            Set<String> paths = new LinkedHashSet<>(analyzer.project().viewPaths());
+            if (analyzer.index() != null) {
+                // META-INF/resources of other modules and jars: served from the classpath of every web app
+                for (FaceletsIndex.Entry entry : analyzer.index().entries()) {
+                    if (entry.webPath() != null && (entry.webRoot() == null || entry.webRoot().endsWith("META-INF/resources"))) {
+                        paths.add(entry.webPath());
+                    }
+                }
+            }
+            for (String path : paths) {
                 items.add(valueItem(path, start, offset, CompletionItemKind.File, null));
             }
             return items;
@@ -284,7 +296,7 @@ public final class CompletionProvider {
         }
 
         if (name.equals("type") && (Namespaces.COMPOSITE.equals(namespace) && local.equals("attribute")
-                || Namespaces.CORE.equals(namespace) && local.equals("importConstants"))) {
+                || analyzer.imports().isTypeAttribute(element, name))) {
             for (String fqn : analyzer.types().findTypes(prefix, 60)) {
                 items.add(valueItem(fqn, start, offset, CompletionItemKind.Class, null));
             }
@@ -538,6 +550,11 @@ public final class CompletionProvider {
                 }
             }
         }
+        for (Imports.Import imported : analyzer.imports().all(analyzer.document().xml())) {
+            if (imported.kind() == Imports.Kind.FUNCTIONS && (context == null || context.namespaceFor(imported.var()) == null)) {
+                items.addAll(importedFunctionItems(imported, start, offset));
+            }
+        }
         if (context != null) {
             for (NamespaceDeclarations.Predefined predefined : namespaces.available(context).values()) {
                 TextEdit declaration = namespaces.declare(predefined.prefix(), predefined.uri());
@@ -581,6 +598,10 @@ public final class CompletionProvider {
             }
         }
         if (library == null) {
+            Imports.Import imported = namespace == null ? analyzer.functionImport(prefix) : null;
+            if (imported != null) {
+                items.addAll(importedFunctionItems(imported, start, offset));
+            }
             return items;
         }
         // editors that treat "prefix:name" as one word filter by all of it, so the items carry the prefix
@@ -595,6 +616,26 @@ public final class CompletionProvider {
             if (declaration != null) {
                 item.setAdditionalTextEdits(List.of(declaration));
             }
+            items.add(item);
+        }
+        return items;
+    }
+
+    /** {@code var:method(...)} items for the static methods of an {@code o:importFunctions}, one per name and arity. */
+    private List<CompletionItem> importedFunctionItems(Imports.Import imported, int start, int offset) {
+        List<CompletionItem> items = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (TypeService.MethodInfo method : analyzer.importedFunctions(imported)) {
+            if (!seen.add(method.name() + "/" + method.parameters().size())) {
+                continue;
+            }
+            String name = imported.var() + ":" + method.name();
+            CompletionItem item = new CompletionItem(name);
+            item.setKind(CompletionItemKind.Function);
+            item.setDetail(method.returnType().display() + " " + method.signature() + " · " + imported.element().name());
+            item.setInsertTextFormat(InsertTextFormat.Snippet);
+            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, name + "($1)")));
+            item.setSortText("3" + name);
             items.add(item);
         }
         return items;
@@ -625,17 +666,13 @@ public final class CompletionProvider {
             }
             case ElType.Bundle bundle -> items.addAll(keyItems(bundle, start, offset));
             case ElType.Constants constants -> {
-                TypeService.TypeInfo info = analyzer.types().info(constants.fqn());
-                if (info != null) {
-                    for (TypeService.FieldInfo field : info.fields()) {
-                        if (field.isStatic()) {
-                            CompletionItem item = new CompletionItem(field.name());
-                            item.setKind(field.enumConstant() ? CompletionItemKind.EnumMember : CompletionItemKind.Constant);
-                            item.setDetail(field.type().display());
-                            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, field.name())));
-                            items.add(item);
-                        }
-                    }
+                for (TypeService.FieldInfo field : analyzer.constants(constants)) {
+                    CompletionItem item = new CompletionItem(field.name());
+                    item.setKind(field.enumConstant() ? CompletionItemKind.EnumMember : CompletionItemKind.Constant);
+                    item.setDetail(constants.allValuesKeys().contains(field.name())
+                            ? field.type().display() + " · all values" : field.type().display());
+                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, field.name())));
+                    items.add(item);
                 }
             }
             default -> {

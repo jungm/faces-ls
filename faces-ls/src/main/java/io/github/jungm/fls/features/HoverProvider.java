@@ -10,6 +10,7 @@ import io.github.jungm.fls.analysis.ElType;
 import io.github.jungm.fls.analysis.ElVariable;
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
+import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
 import io.github.jungm.fls.taglib.TagLibrary;
@@ -162,6 +163,22 @@ public final class HoverProvider {
             }
             case FUNCTION -> {
                 var namespace = site.element() == null ? null : site.element().namespaceFor(hit.function().prefix());
+                Imports.Import imported = namespace == null ? analyzer.functionImport(hit.function().prefix()) : null;
+                if (imported != null) {
+                    TypeService.MethodInfo method = ElAnalyzer.select(analyzer.importedFunctions(imported).stream()
+                            .filter(m -> m.name().equals(hit.name())).toList(), hit.arguments());
+                    if (method == null) {
+                        return null;
+                    }
+                    StringBuilder text = new StringBuilder("```java\nstatic ").append(method.returnType().display()).append(' ')
+                            .append(method.signature()).append("\n```\nImported from `").append(imported.type())
+                            .append("` by `").append(imported.element().name()).append('`');
+                    String doc = analyzer.types().javadoc(method.declaringType(), "method", method.name(), method.parameters().size());
+                    if (doc != null) {
+                        text.append("\n\n---\n").append(doc);
+                    }
+                    return hover(text.toString(), hit.start(), hit.end());
+                }
                 TagLibrary library = namespace == null ? null : analyzer.project().taglibs().library(namespace);
                 TagLibrary.FunctionDef function = library == null ? null : library.functions().get(hit.name());
                 if (function == null) {

@@ -15,7 +15,7 @@ jdtls. It works with any LSP client.
   - attribute values: namespace URIs, template/include paths, component ids for `for`/`render`/`execute`,
     `f:ajax` events, class names for `type` attributes
   - EL: implicit objects, CDI `@Named` beans, managed beans, resource bundle variables, tag variables (`var`,
-    `varStatus`, `ui:param`, `c:set`, `f:importConstants`), lambda parameters, `cc`/`cc.attrs`, bean properties and
+    `varStatus`, `ui:param`, `c:set`, `f:importConstants`, `p:importEnum` and the like), lambda parameters, `cc`/`cc.attrs`, bean properties and
     methods (with generics, e.g. `List<User>` iteration), resource bundle keys, taglib functions
 - **Hover**: tag and attribute documentation, EL types with Javadoc, bundle values.
 - **Go to definition**: EL beans, properties and methods to Java source; bundle keys to `.properties`; composite tags

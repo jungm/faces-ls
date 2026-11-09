@@ -162,6 +162,22 @@
           },
           "markdownDescription": "Predefined namespace prefixes, e.g. `{\"o\": [\"omnifaces\", \"http://omnifaces.org/ui\"]}`. Tags and functions of an undeclared predefined prefix are completed and its `xmlns` declaration is added. A list means \"first one available\", an empty string removes a built-in prefix (`h`, `f`, `ui`, `cc`, `c`, `fn`, `pt`, `jsf`, `p`)."
         },
+        "faces.imports": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "enum": [
+                "constants",
+                "enum",
+                "functions",
+                ""
+              ]
+            }
+          },
+          "markdownDescription": "Tags that import a Java class into EL, by namespace URI and tag name, e.g. `{\"http://example.org/ui\": {\"importEnum\": \"enum\"}}`. The tag takes the class in `type` and the EL name in `var` (default: the simple class name). `constants` exposes static fields, `enum` enum constants plus `ALL_VALUES`, `functions` static methods as `var:method(...)`. Built in: `f:importConstants`, `p:importConstants`, `p:importEnum`, `o:importConstants`, `o:importFunctions`; an empty string removes one."
+        },
         "faces.trace.server": {
           "type": "string",
           "enum": [

@@ -5,7 +5,9 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.eclipse.lsp4j.Location;
@@ -16,7 +18,9 @@ import io.github.jungm.fls.analysis.ElType;
 import io.github.jungm.fls.analysis.ElVariable;
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
+import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.analysis.LineIndex;
+import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
 import io.github.jungm.fls.taglib.Namespaces;
@@ -56,6 +60,11 @@ public final class DefinitionProvider {
         if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE
                 && SearchExpressions.isSearchAttribute(cursor.element(), cursor.attribute().name())) {
             result.addAll(searchExpressionTargets(cursor.element(), cursor.attribute(), offset));
+            return result;
+        }
+        if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE && cursor.attribute().name().equals("name")
+                && isFacelets(cursor.element(), "define") && cursor.attribute().value() != null) {
+            result.addAll(slots(cursor.element(), cursor.attribute().value().trim()));
             return result;
         }
         Location location = switch (cursor.kind()) {
@@ -100,6 +109,13 @@ public final class DefinitionProvider {
             }
             case FUNCTION -> {
                 String namespace = site.element() == null ? null : site.element().namespaceFor(hit.function().prefix());
+                Imports.Import imported = namespace == null ? analyzer.functionImport(hit.function().prefix()) : null;
+                if (imported != null) {
+                    TypeService.MethodInfo method = ElAnalyzer.select(analyzer.importedFunctions(imported).stream()
+                            .filter(m -> m.name().equals(hit.name())).toList(), hit.arguments());
+                    return method == null ? null : java(analyzer.types().location(method.declaringType(), "method",
+                            method.name(), method.parameters().size()));
+                }
                 TagLibrary library = namespace == null ? null : analyzer.project().taglibs().library(namespace);
                 TagLibrary.FunctionDef function = library == null ? null : library.functions().get(hit.name());
                 if (function == null || function.functionClass() == null) {
@@ -235,12 +251,9 @@ public final class DefinitionProvider {
             Path target = resolveView(value);
             return target == null ? null : fileStart(target);
         }
-        if (Namespaces.FACELETS.equals(namespace) && local.equals("define") && name.equals("name")) {
-            return insertDefinition(element, value);
-        }
         if (name.equals("type") && (Namespaces.COMPOSITE.equals(namespace) && local.equals("attribute")
-                || Namespaces.CORE.equals(namespace) && local.equals("importConstants"))) {
-            return java(analyzer.types().location(value, "type", null, -1));
+                || analyzer.imports().isTypeAttribute(element, name))) {
+            return java(analyzer.types().location(value.replace('$', '.'), "type", null, -1));
         }
         if (SearchExpressions.isSearchAttribute(element, name)) {
             return null;
@@ -287,41 +300,176 @@ public final class DefinitionProvider {
         return locations;
     }
 
-    /** Resolves a Facelets path: absolute paths against the web root, others against the current file. */
+    /**
+     * Resolves a Facelets path: relative paths against the current file, absolute ones against its web root, and
+     * else against the web roots of other modules and {@code META-INF/resources} of library jars.
+     */
     private Path resolveView(String value) {
-        Path target;
-        if (value.startsWith("/")) {
-            target = analyzer.project().webRootFor(document.path()).resolve(value.substring(1));
-        } else {
-            target = document.path().getParent().resolve(value);
-        }
-        target = target.normalize();
-        return Files.isRegularFile(target) ? target : null;
+        return resolveView(document.path(), document.uri(), value);
     }
 
-    private Location insertDefinition(XmlElement define, String name) {
-        for (XmlElement ancestor = define.parent(); ancestor != null; ancestor = ancestor.parent()) {
-            String template = ancestor.attributeValue("template");
-            if (template == null || !Namespaces.FACELETS.equals(Namespaces.canonical(ancestor.namespace()))) {
-                continue;
-            }
-            Path file = resolveView(template.trim());
-            if (file == null) {
-                return null;
-            }
-            String uri = file.toUri().toString();
-            String text = textOf(uri);
-            if (text == null) {
-                return null;
-            }
-            for (XmlElement element : XmlDocument.parse(text).allElements()) {
-                XmlAttribute insertName = element.attribute("name");
-                if (element.localName().equals("insert") && insertName != null && name.equals(insertName.value())) {
-                    return new Location(uri, new LineIndex(text).range(insertName.valueStart(), insertName.valueEnd()));
+    /** Resolves a Facelets path that appears in {@code from}, which may be a file other than the current one. */
+    private Path resolveView(Path from, String fromUri, String value) {
+        Path local = value.startsWith("/")
+                ? analyzer.project().webRootFor(from).resolve(value.substring(1)).normalize()
+                : from.getParent().resolve(value).normalize();
+        if (Files.isRegularFile(local)) {
+            return local;
+        }
+        FaceletsIndex.Snapshot index = analyzer.index();
+        if (index != null) {
+            for (String uri : index.resolve(fromUri, value)) {
+                try {
+                    Path file = Path.of(URI.create(uri));
+                    if (Files.isRegularFile(file)) {
+                        return file;
+                    }
+                } catch (RuntimeException e) {
+                    // not a file URI
                 }
             }
-            return fileStart(file);
         }
-        return null;
+        String webPath = webPath(from, fromUri, value);
+        return webPath == null ? null
+                : analyzer.project().findView(webPath, analyzer.project().webRootFor(from)).orElse(null);
+    }
+
+    /** The path below the web root that {@code value} denotes in {@code from}, or null. */
+    private String webPath(Path from, String fromUri, String value) {
+        if (value.startsWith("/")) {
+            return value;
+        }
+        FaceletsIndex.Snapshot index = analyzer.index();
+        FaceletsIndex.Entry entry = index == null ? null : index.entry(fromUri);
+        String current;
+        if (entry != null && entry.webPath() != null) {
+            current = entry.webPath();
+        } else {
+            Path webRoot = analyzer.project().webRootFor(from);
+            if (!from.startsWith(webRoot)) {
+                return null;
+            }
+            current = "/" + webRoot.relativize(from).toString().replace('\\', '/');
+        }
+        String resolved = Path.of(current).getParent().resolve(value).normalize().toString().replace('\\', '/');
+        return resolved.startsWith("/") ? resolved : null;
+    }
+
+    // ---------------------------------------------------------------- template slots
+
+    private static boolean isFacelets(XmlElement element, String localName) {
+        return element.localName().equals(localName) && Namespaces.FACELETS.equals(Namespaces.canonical(element.namespace()));
+    }
+
+    /** A literal view path in an attribute, or null when it is missing or an expression. */
+    private static String literalPath(XmlElement element, String attributeName) {
+        String value = element.attributeValue(attributeName);
+        if (value == null || value.isBlank() || value.contains("#{") || value.contains("${")) {
+            return null;
+        }
+        return value.trim();
+    }
+
+    /**
+     * The {@code ui:insert}s a {@code ui:define} fills: in the template of the enclosing {@code ui:composition} or
+     * {@code ui:decorate}, in the files that template includes, and up its own template chain for names it does not
+     * define itself. Falls back to the start of the template when no slot has that name.
+     */
+    private List<Location> slots(XmlElement define, String name) {
+        List<Location> result = new ArrayList<>();
+        for (XmlElement client = define.parent(); client != null; client = client.parent()) {
+            if (!(isFacelets(client, "composition") || isFacelets(client, "decorate"))) {
+                continue;
+            }
+            String template = literalPath(client, "template");
+            if (template == null) {
+                continue;
+            }
+            Path file = resolveView(template);
+            if (file != null) {
+                collectSlots(file, name, new HashSet<>(), result);
+                if (result.isEmpty()) {
+                    result.add(fileStart(file));
+                }
+            }
+            return result;
+        }
+        return result;
+    }
+
+    private void collectSlots(Path file, String name, Set<Path> visited, List<Location> result) {
+        if (!visited.add(file) || visited.size() > 40) {
+            return;
+        }
+        String uri = file.toUri().toString();
+        String text = textOf(uri);
+        if (text == null) {
+            return;
+        }
+        XmlDocument xml = XmlDocument.parse(text);
+        LineIndex lines = new LineIndex(text);
+        // Facelets drops everything around a ui:composition
+        XmlElement composition = null;
+        for (XmlElement element : xml.allElements()) {
+            if (isFacelets(element, "composition")) {
+                composition = element;
+                break;
+            }
+        }
+        for (XmlElement root : composition != null ? List.of(composition) : xml.roots()) {
+            walkSlots(file, uri, lines, root, name, visited, result);
+        }
+    }
+
+    private void walkSlots(Path file, String uri, LineIndex lines, XmlElement element, String name, Set<Path> visited,
+                           List<Location> result) {
+        if (isFacelets(element, "insert")) {
+            XmlAttribute insertName = element.attribute("name");
+            if (insertName != null && insertName.value() != null && name.equals(insertName.value().trim())) {
+                result.add(new Location(uri, lines.range(insertName.valueStart(), insertName.valueEnd())));
+            }
+        } else if (isFacelets(element, "include")) {
+            String src = literalPath(element, "src");
+            Path included = src == null ? null : resolveView(file, uri, src);
+            if (included != null) {
+                collectSlots(included, name, visited, result);
+            }
+        } else if ((isFacelets(element, "composition") || isFacelets(element, "decorate"))
+                && literalPath(element, "template") != null) {
+            // a template that is itself a template client: only its ui:defines are rendered, and the names it
+            // does not define pass through to its own template
+            List<XmlElement> defines = new ArrayList<>();
+            collectDefines(element, defines);
+            boolean definesName = defines.stream().anyMatch(d -> name.equals(trimmed(d.attributeValue("name"))));
+            if (!definesName) {
+                Path parent = resolveView(file, uri, literalPath(element, "template"));
+                if (parent != null) {
+                    collectSlots(parent, name, visited, result);
+                }
+            }
+            for (XmlElement define : defines) {
+                for (XmlElement child : define.children()) {
+                    walkSlots(file, uri, lines, child, name, visited, result);
+                }
+            }
+            return;
+        }
+        for (XmlElement child : element.children()) {
+            walkSlots(file, uri, lines, child, name, visited, result);
+        }
+    }
+
+    private static void collectDefines(XmlElement element, List<XmlElement> result) {
+        for (XmlElement child : element.children()) {
+            if (isFacelets(child, "define")) {
+                result.add(child);
+            } else if (!isFacelets(child, "composition") && !isFacelets(child, "decorate")) {
+                collectDefines(child, result);
+            }
+        }
+    }
+
+    private static String trimmed(String value) {
+        return value == null ? null : value.trim();
     }
 }

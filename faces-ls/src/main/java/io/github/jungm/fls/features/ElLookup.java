@@ -99,12 +99,8 @@ final class ElLookup {
                 return new MemberTarget(null, null, null, null, null, bundle.baseName(), null);
             }
             case ElType.Constants constants -> {
-                TypeService.TypeInfo info = analyzer.types().info(constants.fqn());
-                if (info == null) {
-                    return null;
-                }
-                for (TypeService.FieldInfo field : info.fields()) {
-                    if (field.isStatic() && field.name().equals(name)) {
+                for (TypeService.FieldInfo field : analyzer.constants(constants)) {
+                    if (field.name().equals(name)) {
                         return new MemberTarget(JType.of(constants.fqn()), null, null, field, null, null, null);
                     }
                 }

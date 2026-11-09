@@ -30,6 +30,7 @@ import com.google.gson.JsonObject;
  */
 public final class ProjectModel {
     private static final Logger LOG = Logger.getLogger(ProjectModel.class.getName());
+    private static final String META_INF_RESOURCES = "META-INF/resources/";
 
     /** @param library jar or module the bean comes from, or null for the project itself */
     public record Bean(String name, JType type, String scope, String origin, String library,
@@ -426,17 +427,71 @@ public final class ProjectModel {
         return Optional.empty();
     }
 
-    /** All Facelets files below the web roots, as paths relative to their web root (starting with '/'). */
+    /**
+     * All Facelets files below the web roots and below {@code META-INF/resources} of the classpath, as paths
+     * relative to their web root (starting with '/').
+     */
     public List<String> viewPaths() {
-        List<String> result = new ArrayList<>();
+        Set<String> result = new LinkedHashSet<>();
         for (Path webRoot : webRoots) {
-            try (Stream<Path> files = Files.walk(webRoot, 12)) {
-                files.filter(p -> p.getFileName().toString().endsWith(".xhtml"))
-                        .forEach(p -> result.add("/" + webRoot.relativize(p).toString().replace('\\', '/')));
-            } catch (IOException e) {
-                LOG.log(Level.FINE, "cannot scan " + webRoot, e);
+            collectViews(webRoot, result);
+        }
+        for (Path entry : classpath) {
+            if (LibraryFiles.isJar(entry)) {
+                for (String name : LibraryFiles.entries(entry)) {
+                    if (name.startsWith(META_INF_RESOURCES) && name.endsWith(".xhtml")) {
+                        result.add(name.substring(META_INF_RESOURCES.length() - 1));
+                    }
+                }
+            } else if (Files.isDirectory(entry.resolve(META_INF_RESOURCES))) {
+                collectViews(entry.resolve(META_INF_RESOURCES), result);
             }
         }
-        return result;
+        return List.copyOf(result);
+    }
+
+    private static void collectViews(Path webRoot, Set<String> result) {
+        try (Stream<Path> files = Files.walk(webRoot, 12)) {
+            files.filter(p -> p.getFileName().toString().endsWith(".xhtml"))
+                    .forEach(p -> result.add("/" + webRoot.relativize(p).toString().replace('\\', '/')));
+        } catch (IOException e) {
+            LOG.log(Level.FINE, "cannot scan " + webRoot, e);
+        }
+    }
+
+    /**
+     * The file of a view path (e.g. {@code /WEB-INF/layout.xhtml}): below one of the web roots, preferring
+     * {@code preferredWebRoot}, or else below {@code META-INF/resources} of a classpath directory or jar (extracted).
+     */
+    public Optional<Path> findView(String webPath, Path preferredWebRoot) {
+        String relative = webPath.startsWith("/") ? webPath.substring(1) : webPath;
+        if (relative.isEmpty() || relative.endsWith("/")) {
+            return Optional.empty();
+        }
+        List<Path> roots = new ArrayList<>();
+        if (preferredWebRoot != null) {
+            roots.add(preferredWebRoot);
+        }
+        roots.addAll(webRoots);
+        for (Path webRoot : roots) {
+            Path file = webRoot.resolve(relative).normalize();
+            if (file.startsWith(webRoot) && Files.isRegularFile(file)) {
+                return Optional.of(file);
+            }
+        }
+        String entryName = Path.of(META_INF_RESOURCES).resolve(relative).normalize().toString().replace('\\', '/');
+        if (!entryName.startsWith(META_INF_RESOURCES)) {
+            return Optional.empty();
+        }
+        for (Path entry : classpath) {
+            if (LibraryFiles.isJar(entry)) {
+                if (LibraryFiles.contains(entry, entryName)) {
+                    return Optional.ofNullable(LibraryFiles.extract(entry, entryName));
+                }
+            } else if (Files.isRegularFile(entry.resolve(entryName))) {
+                return Optional.of(entry.resolve(entryName));
+            }
+        }
+        return Optional.empty();
     }
 }

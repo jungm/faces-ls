@@ -57,7 +57,7 @@ Responsibilities:
     attributes from `<cc:interface>`.
   - Typed attribute values (enums/booleans/paths) are ported from IntelliJ's reference files for each library.
 - **EL engine**: its own parser, a scope model for the
-  implicit objects and the variables tags declare (`var`, `ui:param`, `f:loadBundle`, `f:importConstants`,
+  implicit objects and the variables tags declare (`var`, `ui:param`, `f:loadBundle`, `f:importConstants` and similar tags such as `p:importEnum` or `o:importFunctions`,
   `cc.attrs`), and type evaluation through faces-jdt.
 - **LSP features**: completion, hover (Javadoc), definition, references, rename, signatureHelp, documentLink (paths),
   publishDiagnostics, codeAction (create property/method, create composite component/attribute, extract composite

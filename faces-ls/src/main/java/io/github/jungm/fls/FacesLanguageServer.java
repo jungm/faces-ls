@@ -341,7 +341,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     private ElAnalyzer analyzer(FacesDocument document) {
         ProjectModel project = projects.forFile(document.path());
         index.addClasspath(project.classpath());
-        return new ElAnalyzer(project, document).withIndex(index.snapshot());
+        return new ElAnalyzer(project, document).withIndex(index.snapshot()).withImports(settings.imports());
     }
 
     private void scheduleDiagnostics(String uri, long delayMillis) {
@@ -581,7 +581,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         if (params.getSettings() instanceof JsonObject json) {
             JsonElement faces = json.has("faces") ? json.get("faces") : json.has("faces-ls") ? json.get("faces-ls") : json;
             settings = FacesSettings.from(faces);
-            LOG.info("settings updated: namespaces " + settings.namespaces().keySet());
+            LOG.info("settings updated: namespaces " + settings.namespaces().keySet() + ", imports " + settings.imports().tags());
         }
     }
 

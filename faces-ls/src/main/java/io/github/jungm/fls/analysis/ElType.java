@@ -1,5 +1,7 @@
 package io.github.jungm.fls.analysis;
 
+import java.util.List;
+
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.taglib.TagLibrary;
@@ -17,8 +19,14 @@ public sealed interface ElType {
     record Bundle(String baseName) implements ElType {
     }
 
-    /** The class named in {@code f:importConstants}: properties are its static fields. */
-    record Constants(String fqn) implements ElType {
+    /**
+     * A class imported by {@code f:importConstants} and similar tags ({@link Imports}): properties are its static
+     * fields, or only its enum constants plus {@code allValuesKeys} for {@code p:importEnum}.
+     */
+    record Constants(String fqn, boolean enumOnly, List<String> allValuesKeys) implements ElType {
+        public Constants(String fqn) {
+            this(fqn, false, List.of());
+        }
     }
 
     /** {@code cc} in a composite component: a UIComponent whose {@code attrs} are the interface attributes. */

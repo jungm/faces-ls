@@ -117,6 +117,80 @@ class IndexTest {
     }
 
     @Test
+    void navigatesToIncludesInOtherModules() throws Exception {
+        Path debug = write("shared/src/main/resources/META-INF/resources/shared-debug/debug.xhtml",
+                "<ui:composition" + NS + "><ui:include src=\"panel.xhtml\"/></ui:composition>\n");
+        Path panel = write("shared/src/main/resources/META-INF/resources/shared-debug/panel.xhtml",
+                "<ui:composition" + NS + "/>\n");
+        Path host = write("web/src/main/webapp/host.xhtml",
+                "<ui:composition" + NS + "><ui:include src=\"/shared-debug/debug.xhtml\"/></ui:composition>\n");
+        index.rebuildNow();
+
+        ProjectModel web = new ProjectModel(workspace.resolve("web"), null);
+        web.refresh();
+        String text = Files.readString(host);
+        ElAnalyzer analyzer = new ElAnalyzer(web, new FacesDocument(uri(host), text, 1)).withIndex(index.snapshot());
+        List<Location> include = new DefinitionProvider(analyzer, u -> null).definition(text.indexOf("/shared-debug") + 3);
+        assertEquals(1, include.size(), include.toString());
+        assertEquals(uri(debug), include.get(0).getUri());
+
+        List<String> paths = new CompletionProvider(analyzer, FacesSettings.defaults()).complete(text.indexOf("/shared-debug"))
+                .stream().map(CompletionItem::getLabel).toList();
+        assertTrue(paths.contains("/shared-debug/debug.xhtml"), paths.toString());
+
+        // a relative include inside the other module
+        ProjectModel shared = new ProjectModel(workspace.resolve("shared"), null);
+        shared.refresh();
+        String debugText = Files.readString(debug);
+        ElAnalyzer inShared = new ElAnalyzer(shared, new FacesDocument(uri(debug), debugText, 1)).withIndex(index.snapshot());
+        List<Location> relative = new DefinitionProvider(inShared, u -> null).definition(debugText.indexOf("panel.xhtml") + 2);
+        assertEquals(uri(panel), relative.get(0).getUri());
+    }
+
+    @Test
+    void navigatesFromDefinesToTheirSlotsThroughTheTemplateChain() throws Exception {
+        Path base = write("web/src/main/webapp/WEB-INF/base.xhtml", "<html" + NS + "><h:body>\n"
+                + "  <ui:insert name=\"header\"/><ui:insert name=\"title\"/><ui:insert name=\"content\"/>\n"
+                + "</h:body></html>\n");
+        Path inner = write("web/src/main/webapp/WEB-INF/inner.xhtml", "<ui:composition" + NS + " template=\"base.xhtml\">\n"
+                + "  <ui:define name=\"title\">fixed</ui:define>\n"
+                + "  <ui:define name=\"content\"><div><ui:insert name=\"content\"/><ui:include src=\"side.xhtml\"/></div></ui:define>\n"
+                + "  <ui:insert name=\"content\"/>\n"
+                + "</ui:composition>\n");
+        Path side = write("web/src/main/webapp/WEB-INF/side.xhtml", "<ui:composition" + NS + ">\n"
+                + "  <ui:insert name=\"side\"/>\n</ui:composition>\n");
+        Path client = write("web/src/main/webapp/client.xhtml", "<ui:composition" + NS + " template=\"/WEB-INF/inner.xhtml\">\n"
+                + "  <ui:define name=\"content\"/><ui:define name=\"side\"/><ui:define name=\"header\"/>"
+                + "<ui:define name=\"title\"/><ui:define name=\"missing\"/>\n"
+                + "</ui:composition>\n");
+        index.rebuildNow();
+        ProjectModel web = new ProjectModel(workspace.resolve("web"), null);
+        web.refresh();
+        String text = Files.readString(client);
+        DefinitionProvider definitions = new DefinitionProvider(
+                new ElAnalyzer(web, new FacesDocument(uri(client), text, 1)).withIndex(index.snapshot()), u -> null);
+        java.util.function.Function<String, List<Location>> slotsOf =
+                name -> definitions.definition(text.indexOf("\"" + name + "\"") + 2);
+
+        // the insert inside inner's define, not the one outside it that Facelets drops
+        List<Location> content = slotsOf.apply("content");
+        assertEquals(1, content.size(), content.toString());
+        assertEquals(uri(inner), content.get(0).getUri());
+        String innerText = Files.readString(inner);
+        int slotLine = (int) innerText.substring(0, innerText.indexOf("<div><ui:insert")).chars().filter(c -> c == '\n').count();
+        assertEquals(slotLine, content.get(0).getRange().getStart().getLine());
+        // a file the template includes
+        assertEquals(List.of(uri(side)), slotsOf.apply("side").stream().map(Location::getUri).toList());
+        // a name the intermediate template does not define reaches its own template
+        assertEquals(List.of(uri(base)), slotsOf.apply("header").stream().map(Location::getUri).toList());
+        // inner defines "title" itself, so the client's define fills nothing: falls back to the template
+        List<Location> title = slotsOf.apply("title");
+        assertEquals(List.of(uri(inner)), title.stream().map(Location::getUri).toList());
+        assertEquals(0, title.get(0).getRange().getStart().getLine());
+        assertEquals(0, slotsOf.apply("missing").get(0).getRange().getStart().getLine());
+    }
+
+    @Test
     void navigatesToAbsoluteClientIdsInOtherFiles() throws Exception {
         ElAnalyzer analyzer = analyzer(person);
         String text = analyzer.document().text();

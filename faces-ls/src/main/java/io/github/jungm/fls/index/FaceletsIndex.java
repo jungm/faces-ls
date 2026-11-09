@@ -504,6 +504,18 @@ public final class FaceletsIndex implements AutoCloseable {
             return candidates;
         }
 
+        /**
+         * The files a view path in {@code fromUri} refers to: absolute paths against every indexed web root
+         * (workspace modules and jars), relative ones against the including file.
+         */
+        public List<String> resolve(String fromUri, String path) {
+            Entry from = entries.get(fromUri);
+            if (from == null) {
+                return path.startsWith("/") ? byWebPath.getOrDefault(path, List.of()) : List.of();
+            }
+            return resolvePath(from, path);
+        }
+
         public Entry entry(String uri) {
             return entries.get(uri);
         }

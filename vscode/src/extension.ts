@@ -103,6 +103,7 @@ async function stopClient(): Promise<void> {
 function serverSettings(config: vscode.WorkspaceConfiguration): Record<string, unknown> {
   const settings: Record<string, unknown> = {
     namespaces: config.get('namespaces') ?? {},
+    imports: config.get('imports') ?? {},
   };
   const logFile = config.get<string | null>('server.logFile');
   if (logFile) {

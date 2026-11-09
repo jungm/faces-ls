@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.taglib.Namespaces;
 
 import com.google.gson.JsonElement;
@@ -15,8 +16,9 @@ import com.google.gson.JsonObject;
  *
  * @param namespaces predefined namespace prefixes: prefix to candidate URIs, first available one wins. Completing a
  *                   tag or function of such a prefix declares it on the root element when the page lacks it.
+ * @param imports    tags that import a class into EL ({@code f:importConstants} and the like), see {@link Imports#from}
  */
-public record FacesSettings(Map<String, List<String>> namespaces) {
+public record FacesSettings(Map<String, List<String>> namespaces, Imports imports) {
 
     /** The standard libraries under their conventional prefixes, plus PrimeFaces. */
     public static Map<String, List<String>> defaultNamespaces() {
@@ -29,12 +31,12 @@ public record FacesSettings(Map<String, List<String>> namespaces) {
     }
 
     public static FacesSettings defaults() {
-        return new FacesSettings(defaultNamespaces());
+        return new FacesSettings(defaultNamespaces(), Imports.DEFAULT);
     }
 
     /**
-     * Reads {@code {"namespaces": {"p": "primefaces", "o": ["omnifaces", "http://omnifaces.org/ui"]}}}. User entries
-     * replace defaults with the same prefix; an empty string or {@code null} removes a default.
+     * Reads {@code {"namespaces": {"p": "primefaces", "o": ["omnifaces", "http://omnifaces.org/ui"]}, "imports": {...}}}.
+     * User entries replace defaults with the same prefix; an empty string or {@code null} removes a default.
      */
     public static FacesSettings from(JsonElement settings) {
         Map<String, List<String>> namespaces = defaultNamespaces();
@@ -55,6 +57,7 @@ public record FacesSettings(Map<String, List<String>> namespaces) {
                 }
             }
         }
-        return new FacesSettings(Map.copyOf(namespaces));
+        JsonElement imports = settings != null && settings.isJsonObject() ? settings.getAsJsonObject().get("imports") : null;
+        return new FacesSettings(Map.copyOf(namespaces), Imports.from(imports));
     }
 }

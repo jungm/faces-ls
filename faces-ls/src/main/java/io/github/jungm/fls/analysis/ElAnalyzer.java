@@ -39,10 +39,22 @@ public final class ElAnalyzer {
     private final Map<XmlAttribute, ElType> attributeTypes = new java.util.IdentityHashMap<>();
 
     private io.github.jungm.fls.index.FaceletsIndex.Snapshot index;
+    private Imports imports = Imports.DEFAULT;
 
     /** The workspace Facelets index, or null when it is not built (yet). */
     public io.github.jungm.fls.index.FaceletsIndex.Snapshot index() {
         return index;
+    }
+
+    /** The tags that import classes into EL. */
+    public Imports imports() {
+        return imports;
+    }
+
+    public ElAnalyzer withImports(Imports imports) {
+        this.imports = imports;
+        this.documentScope = null;
+        return this;
     }
 
     public ElAnalyzer withIndex(io.github.jungm.fls.index.FaceletsIndex.Snapshot snapshot) {
@@ -66,6 +78,33 @@ public final class ElAnalyzer {
 
     public TypeService types() {
         return project.types();
+    }
+
+    /**
+     * The properties an imported class exposes: its static fields, inherited ones included (only enum constants for
+     * {@code p:importEnum}), then the arrays of all enum values.
+     */
+    public List<TypeService.FieldInfo> constants(ElType.Constants constants) {
+        List<TypeService.FieldInfo> result = new ArrayList<>();
+        for (TypeService.FieldInfo field : types().members(JType.of(constants.fqn())).fields()) {
+            if (field.isStatic() && (!constants.enumOnly() || field.enumConstant())) {
+                result.add(field);
+            }
+        }
+        for (String key : constants.allValuesKeys()) {
+            result.add(new TypeService.FieldInfo(key, JType.parse(constants.fqn() + "[]"), true, false, constants.fqn()));
+        }
+        return result;
+    }
+
+    /** The {@code o:importFunctions} of this document for an EL function prefix, or null. */
+    public Imports.Import functionImport(String prefix) {
+        return imports.functions(document.xml(), prefix);
+    }
+
+    /** The static methods an {@code o:importFunctions} makes callable, inherited ones included. */
+    public List<TypeService.MethodInfo> importedFunctions(Imports.Import imported) {
+        return types().members(JType.of(imported.type())).methods().stream().filter(TypeService.MethodInfo::isStatic).toList();
     }
 
     // ---------------------------------------------------------------- scope
@@ -116,9 +155,9 @@ public final class ElAnalyzer {
         }
     }
 
-    private static boolean isDocumentLevelDeclaration(XmlElement element) {
+    private boolean isDocumentLevelDeclaration(XmlElement element) {
         String local = element.localName();
-        return local.equals("loadBundle") || local.equals("set") || local.equals("importConstants");
+        return local.equals("loadBundle") || local.equals("set") || imports.kind(element) != null;
     }
 
     /** Variables valid anywhere in the document. */
@@ -137,14 +176,11 @@ public final class ElAnalyzer {
                     scope.putIfAbsent(var, new ElVariable(var, new ElType.Bundle(baseName.trim()), ElVariable.Kind.BUNDLE,
                             "f:loadBundle " + baseName, document.uri(), element.attribute("var").valueStart(), null));
                 }
-            } else if (Namespaces.CORE.equals(namespace) && local.equals("importConstants")) {
-                String type = element.attributeValue("type");
-                if (type != null) {
-                    String var = element.attributeValue("var");
-                    String name = var != null ? var : type.substring(type.lastIndexOf('.') + 1);
-                    scope.putIfAbsent(name, new ElVariable(name, new ElType.Constants(type.trim()), ElVariable.Kind.CONSTANTS,
-                            "f:importConstants " + type, document.uri(), element.attribute("type").valueStart(), null));
-                }
+            } else if (imports.of(element) instanceof Imports.Import imported && imported.kind() != Imports.Kind.FUNCTIONS) {
+                ElType.Constants type = new ElType.Constants(imported.type(), imported.kind() == Imports.Kind.ENUM,
+                        imported.allValuesKeys());
+                scope.putIfAbsent(imported.var(), new ElVariable(imported.var(), type, ElVariable.Kind.CONSTANTS,
+                        element.name() + " " + imported.type(), document.uri(), imported.declarationOffset(), null));
             } else if (Namespaces.FACELETS.equals(namespace) && local.equals("param")) {
                 XmlAttribute name = element.attribute("name");
                 if (name != null && name.value() != null) {
@@ -523,16 +559,19 @@ public final class ElAnalyzer {
                     return ElType.java("java.lang.String");
                 }
                 case ElType.Constants constants -> {
-                    TypeService.TypeInfo info = types().info(constants.fqn());
-                    if (info == null) {
+                    if (constants.allValuesKeys().contains(name)) {
+                        return ElType.java(constants.fqn() + "[]");
+                    }
+                    if (types().info(constants.fqn()) == null) {
                         return ElType.UNKNOWN;
                     }
-                    for (TypeService.FieldInfo field : info.fields()) {
-                        if (field.isStatic() && field.name().equals(name)) {
+                    for (TypeService.FieldInfo field : constants(constants)) {
+                        if (field.name().equals(name)) {
                             return ElType.java(field.type());
                         }
                     }
-                    problem("Cannot resolve constant '" + name + "' in " + constants.fqn(), start, end, Severity.WARNING);
+                    problem("Cannot resolve " + (constants.enumOnly() ? "enum constant '" : "constant '") + name + "' in "
+                            + constants.fqn(), start, end, Severity.WARNING);
                     return ElType.UNKNOWN;
                 }
                 case ElType.CompositeComponent component -> {
@@ -610,6 +649,29 @@ public final class ElAnalyzer {
             function.arguments().forEach(this::eval);
             XmlElement context = document.xml().elementAt(function.start());
             String namespace = context == null ? null : context.namespaceFor(function.prefix());
+            Imports.Import imported = namespace == null ? functionImport(function.prefix()) : null;
+            if (imported != null) {
+                if (function.name().isEmpty() || types().info(imported.type()) == null) {
+                    return ElType.UNKNOWN;
+                }
+                List<TypeService.MethodInfo> candidates = importedFunctions(imported).stream()
+                        .filter(m -> m.name().equals(function.name())).toList();
+                if (candidates.isEmpty()) {
+                    problem("Cannot resolve static method '" + function.name() + "' in " + imported.type(),
+                            function.nameStart(), function.nameEnd(), Severity.WARNING);
+                    return ElType.UNKNOWN;
+                }
+                TypeService.MethodInfo method = select(candidates, function.arguments().size());
+                if (method == null) {
+                    problem("Function '" + function.prefix() + ":" + function.name() + "' takes "
+                            + candidates.get(0).parameters().size() + " argument(s)", function.nameStart(), function.nameEnd(),
+                            Severity.WARNING);
+                    return ElType.UNKNOWN;
+                }
+                JType result = method.returnType();
+                return result.isVoid() || result.name().equals("java.lang.Object") || result.isTypeVariable()
+                        ? ElType.UNKNOWN : ElType.java(result);
+            }
             if (namespace == null) {
                 if (problems != null) {
                     problem("Unknown namespace prefix '" + function.prefix() + "'", function.prefixStart(),
