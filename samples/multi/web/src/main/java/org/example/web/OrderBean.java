@@ -22,4 +22,8 @@ public class OrderBean {
     public void setCustomer(String customer) {
         this.customer = customer;
     }
+
+    public String getSummary() {
+        return getCustomer() + ": " + getTotal();
+    }
 }

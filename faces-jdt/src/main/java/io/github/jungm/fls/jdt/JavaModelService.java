@@ -97,8 +97,23 @@ final class JavaModelService {
             case "javadoc" -> withProject(params, project -> javadoc(project, params));
             case "findTypes" -> withProject(params, project -> findTypes(project, params.get("prefix").getAsString(),
                     params.has("limit") ? params.get("limit").getAsInt() : 50));
+            case "callHierarchy/prepare" -> callHierarchy(() -> CallHierarchy.get().prepare(params));
+            case "callHierarchy/incoming" -> callHierarchy(() -> CallHierarchy.get().incoming(params));
+            case "callHierarchy/outgoing" -> callHierarchy(() -> CallHierarchy.get().outgoing(params));
             default -> throw new IllegalArgumentException("unknown method " + method);
         };
+    }
+
+    private interface Reflective {
+        JsonElement get() throws ReflectiveOperationException;
+    }
+
+    private static JsonElement callHierarchy(Reflective call) {
+        try {
+            return call.get();
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("jdtls call hierarchy not usable", e);
+        }
     }
 
     private interface ProjectFunction {

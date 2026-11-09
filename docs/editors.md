@@ -61,6 +61,11 @@ Pass settings as initialization options, or with `workspace/didChangeConfigurati
 faces-ls also provides call hierarchy (who uses a composite, include or template), references and a code lens
 with usage counts, based on an index of all Facelets files in the workspace folders.
 
+For Java files, faces-ls answers the call hierarchy too: jdtls' own (through faces-jdt) plus the Facelets files
+whose EL uses the member. To get it, send `textDocument/prepareCallHierarchy` and the incoming/outgoing calls for
+Java documents to faces-ls instead of jdtls while it reports `{"connected": true}` in the `faces/javaStatus`
+notification.
+
 Code action kinds: `quickfix` (declare a namespace, add required attributes) and `source.addMissingImports`
 (declare all missing namespaces), which editors can run on save.
 

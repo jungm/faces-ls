@@ -16,6 +16,8 @@ integration, powered by the [Faces Language Server](https://github.com/jungm/fac
   `@form:@child(0)` and absolute client ids across templates, includes and composites.
 - **Find references**, **call hierarchy** and a **code lens** showing where composites, includes and templates
   are used.
+- **Facelets callers in the Java call hierarchy**: "Show Call Hierarchy" on a Java method, getter or setter lists
+  the `.xhtml` files whose EL uses it next to the Java callers (needs the Red Hat Java extension).
 - **Diagnostics** for unknown tags and attributes, missing required attributes, undeclared prefixes, EL syntax
   errors and unresolved beans, properties, methods, functions and bundle keys.
 - **Quick fix** to declare missing namespaces (also as the `source.addMissingImports` code action).

@@ -81,6 +81,7 @@ import io.github.jungm.fls.features.CompletionProvider;
 import io.github.jungm.fls.features.DefinitionProvider;
 import io.github.jungm.fls.features.DiagnosticsProvider;
 import io.github.jungm.fls.features.HoverProvider;
+import io.github.jungm.fls.features.JavaUsages;
 import io.github.jungm.fls.features.SemanticTokensProvider;
 import io.github.jungm.fls.features.UsageProvider;
 import io.github.jungm.fls.index.FaceletsIndex;
@@ -103,6 +104,13 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         return thread;
     });
     private final Map<String, FacesDocument> documents = new ConcurrentHashMap<>();
+    private final java.util.concurrent.ExecutorService searcher = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "faces-ls-search");
+        thread.setDaemon(true);
+        return thread;
+    });
+    /** lsp4j's own Gson, for LSP types that cross the faces-jdt socket. */
+    private static final com.google.gson.Gson LSP_JSON = new org.eclipse.lsp4j.jsonrpc.json.MessageJsonHandler(Map.of()).getGson();
     private final Map<String, ScheduledFuture<?>> pendingDiagnostics = new ConcurrentHashMap<>();
     private LanguageClient client;
     private JdtClient jdt;
@@ -211,6 +219,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public void initialized(InitializedParams params) {
+        worker.execute(this::publishJavaStatus);
         List<FileSystemWatcher> watchers = new ArrayList<>();
         for (String pattern : List.of("**/*.xhtml", "**/faces-config.xml", "**/web.xml", "**/*.taglib.xml", "**/*.properties")) {
             watchers.add(new FileSystemWatcher(Either.forLeft(pattern)));
@@ -277,6 +286,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public void exit() {
         worker.shutdownNow();
+        searcher.shutdownNow();
         System.exit(0);
     }
 
@@ -404,6 +414,15 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     private void onJdtConnectionChanged() {
         projects.reset();
         republishAll();
+        publishJavaStatus();
+    }
+
+    private void publishJavaStatus() {
+        if (client instanceof FacesLanguageClient faces) {
+            JsonObject status = new JsonObject();
+            status.addProperty("connected", jdt != null && jdt.connected());
+            faces.javaStatus(status);
+        }
     }
 
     private <T> CompletableFuture<T> onWorker(Supplier<T> task, T fallback) {
@@ -512,6 +531,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public CompletableFuture<List<CallHierarchyItem>> prepareCallHierarchy(CallHierarchyPrepareParams params) {
         String uri = params.getTextDocument().getUri();
+        if (isJava(uri)) {
+            return onSearcher(() -> javaPrepare(params), List.of());
+        }
         return onWorker(() -> {
             FacesDocument document = documents.get(uri);
             FaceletsIndex.Snapshot snapshot = index.snapshot();
@@ -525,6 +547,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public CompletableFuture<List<CallHierarchyIncomingCall>> callHierarchyIncomingCalls(CallHierarchyIncomingCallsParams params) {
+        if (isJavaItem(params.getItem())) {
+            return onSearcher(() -> javaIncoming(params.getItem()), List.of());
+        }
         return onWorker(() -> {
             FaceletsIndex.Snapshot snapshot = index.snapshot();
             return snapshot == null ? List.<CallHierarchyIncomingCall>of()
@@ -534,11 +559,114 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public CompletableFuture<List<CallHierarchyOutgoingCall>> callHierarchyOutgoingCalls(CallHierarchyOutgoingCallsParams params) {
+        if (isJavaItem(params.getItem())) {
+            return onSearcher(() -> javaCalls(jdt.request("callHierarchy/outgoing", itemParams(params.getItem()), 60000),
+                    CallHierarchyOutgoingCall.class), List.of());
+        }
         return onWorker(() -> {
             FaceletsIndex.Snapshot snapshot = index.snapshot();
             return snapshot == null ? List.<CallHierarchyOutgoingCall>of()
                     : new UsageProvider(snapshot).outgoing(itemUri(params.getItem()));
         }, List.of());
+    }
+
+    // ---------------------------------------------------------------- call hierarchy of Java members
+
+    private static boolean isJava(String uri) {
+        return uri.endsWith(".java") || uri.startsWith("jdt:");
+    }
+
+    /** Items made by faces-jdt carry the Java member in {@code data.member}. */
+    private static boolean isJavaItem(CallHierarchyItem item) {
+        return item.getData() instanceof JsonObject data && data.has("member");
+    }
+
+    /** jdtls' items at the position, through faces-jdt. */
+    private List<CallHierarchyItem> javaPrepare(CallHierarchyPrepareParams params) {
+        JsonObject request = new JsonObject();
+        request.addProperty("uri", params.getTextDocument().getUri());
+        request.addProperty("line", params.getPosition().getLine());
+        request.addProperty("character", params.getPosition().getCharacter());
+        return javaCalls(jdt.request("callHierarchy/prepare", request, 15000), CallHierarchyItem.class);
+    }
+
+    /** jdtls' callers of a Java member, followed by the Facelets files whose EL uses it. */
+    private List<CallHierarchyIncomingCall> javaIncoming(CallHierarchyItem item) {
+        List<CallHierarchyIncomingCall> calls = new ArrayList<>(
+                javaCalls(jdt.request("callHierarchy/incoming", itemParams(item), 60000), CallHierarchyIncomingCall.class));
+        JsonElement memberJson = ((JsonObject) item.getData()).get("member");
+        JavaUsages.Member member = memberJson instanceof JsonObject json ? JavaUsages.Member.from(json) : null;
+        FaceletsIndex.Snapshot snapshot = index.snapshot();
+        if (member == null || snapshot == null) {
+            return calls;
+        }
+        List<io.github.jungm.fls.taglib.TagLibrary> libraries = new ArrayList<>();
+        for (ProjectModel project : projects.projects()) {
+            libraries.addAll(project.taglibs().projectLibraries());
+        }
+        Map<ProjectModel, Boolean> ready = new java.util.IdentityHashMap<>();
+        Map<String, List<org.eclipse.lsp4j.Range>> usages = new JavaUsages(snapshot, entry -> {
+            Path path = Path.of(URI.create(entry.uri()));
+            ProjectModel project = projects.forFile(path);
+            ready.computeIfAbsent(project, FacesLanguageServer::awaitBeans);
+            FacesDocument open = documents.get(entry.uri());
+            FacesDocument document = open != null ? open : new FacesDocument(entry.uri(), entry.text(), 0);
+            return new ElAnalyzer(project, document).withIndex(snapshot).withImports(settings.imports());
+        }).find(member, libraries);
+        UsageProvider files = new UsageProvider(snapshot);
+        for (Map.Entry<String, List<org.eclipse.lsp4j.Range>> usage : usages.entrySet()) {
+            CallHierarchyItem from = files.item(usage.getKey());
+            from.setRange(usage.getValue().get(0));
+            from.setSelectionRange(usage.getValue().get(0));
+            calls.add(new CallHierarchyIncomingCall(from, usage.getValue()));
+        }
+        return calls;
+    }
+
+    /** EL names resolve through beans, which jdtls searches in the background after a change. */
+    private static boolean awaitBeans(ProjectModel project) {
+        project.beans();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (!project.beansLoaded() && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return project.beansLoaded();
+    }
+
+    private static JsonObject itemParams(CallHierarchyItem item) {
+        JsonObject params = new JsonObject();
+        params.add("item", LSP_JSON.toJsonTree(item));
+        return params;
+    }
+
+    private static <T> List<T> javaCalls(JsonElement response, Class<T> type) {
+        List<T> result = new ArrayList<>();
+        if (response instanceof com.google.gson.JsonArray array) {
+            for (JsonElement element : array) {
+                result.add(LSP_JSON.fromJson(element, type));
+            }
+        }
+        return result;
+    }
+
+    /** Workspace searches run apart from the worker, so completion and diagnostics keep going meanwhile. */
+    private <T> CompletableFuture<T> onSearcher(Supplier<T> task, T fallback) {
+        if (jdt == null || !jdt.connected()) {
+            return CompletableFuture.completedFuture(fallback);
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return task.get();
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "request failed", e);
+                return fallback;
+            }
+        }, searcher);
     }
 
     private static String itemUri(CallHierarchyItem item) {

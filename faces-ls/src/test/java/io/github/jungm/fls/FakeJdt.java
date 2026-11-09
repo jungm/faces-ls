@@ -30,6 +30,7 @@ final class FakeJdt implements AutoCloseable {
     private final Path workspace;
     private final ServerSocket server;
     private final Map<String, JsonObject> types = new HashMap<>();
+    private final JsonArray beans = new JsonArray();
     private final JdtClient client;
 
     FakeJdt(Path workspace, Path rendezvous) throws IOException {
@@ -110,6 +111,16 @@ final class FakeJdt implements AutoCloseable {
         return this;
     }
 
+    /** Declares a CDI bean. */
+    FakeJdt bean(String name, String type) {
+        JsonObject bean = new JsonObject();
+        bean.addProperty("name", name);
+        bean.addProperty("type", type);
+        bean.addProperty("kind", "Named");
+        beans.add(bean);
+        return this;
+    }
+
     private void accept() {
         while (!server.isClosed()) {
             try {
@@ -160,7 +171,7 @@ final class FakeJdt implements AutoCloseable {
                 return result;
             }
             case "beans" -> {
-                return new JsonArray();
+                return beans;
             }
             case "type" -> {
                 JsonObject type = types.get(params.get("fqn").getAsString());

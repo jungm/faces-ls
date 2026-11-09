@@ -70,7 +70,7 @@ final class ElLookup {
         return hit[0];
     }
 
-    private static int argumentsOf(ElNode root, ElNode.Member member) {
+    static int argumentsOf(ElNode root, ElNode.Member member) {
         int[] count = {-1};
         root.walk(node -> {
             if (node instanceof ElNode.Call call && call.target() == member) {

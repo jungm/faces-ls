@@ -28,6 +28,8 @@ jdtls. It works with any LSP client.
   `META-INF/resources`, plus library jars) follows composite components, `ui:include` and templates. Incoming
   calls in the call hierarchy show who uses a composite, include or template, level by level up to the pages;
   find references lists all usages; a code lens shows "used in N files · M pages".
+- **Facelets callers of Java members**: the call hierarchy of a Java method, getter, setter or constant (through
+  jdtls and faces-jdt) lists the `.xhtml` files whose EL uses it next to the Java callers.
 - **Client ids across files**: pages are expanded through templates, includes and composites, so `update`,
   `process`, ... complete absolute client ids such as `:mainForm:angaben:person:street` of every page the current
   file ends up in, and go to definition / hover resolve them into the file that declares the component. Ids below

@@ -50,6 +50,11 @@ final class JdtServer implements IElementChangedListener {
         thread.setDaemon(true);
         return thread;
     });
+    private final java.util.concurrent.ExecutorService searches = Executors.newFixedThreadPool(2, r -> {
+        Thread thread = new Thread(r, "faces-jdt-search");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final JavaModelService service;
     private ServerSocket serverSocket;
     private Path rendezvousFile;
@@ -93,6 +98,7 @@ final class JdtServer implements IElementChangedListener {
     void close() {
         JavaCore.removeElementChangedListener(this);
         scheduler.shutdownNow();
+        searches.shutdownNow();
         for (Connection connection : connections) {
             connection.close();
         }
@@ -195,7 +201,13 @@ final class JdtServer implements IElementChangedListener {
                 log("client connected");
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    handle(line);
+                    if (line.contains("\"callHierarchy/")) {
+                        // workspace searches: do not hold up the quick type queries behind them
+                        String request = line;
+                        searches.execute(() -> handle(request));
+                    } else {
+                        handle(line);
+                    }
                 }
             } catch (IOException e) {
                 // client went away

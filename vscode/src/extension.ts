@@ -2,10 +2,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { LanguageClient, LanguageClientOptions, ServerOptions, TransportKind } from 'vscode-languageclient/node';
+import { JavaCallHierarchy } from './javaCallHierarchy';
 
 const MIN_JAVA_VERSION = 21;
 
 let client: LanguageClient | undefined;
+let javaCallHierarchy: JavaCallHierarchy | undefined;
 let output: vscode.LogOutputChannel | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -82,9 +84,12 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   };
 
   client = new LanguageClient('faces', 'Faces Language Server', serverOptions, clientOptions);
+  javaCallHierarchy = new JavaCallHierarchy(client, output);
   try {
     await client.start();
   } catch (error) {
+    javaCallHierarchy.dispose();
+    javaCallHierarchy = undefined;
     client = undefined;
     output?.error('Language server failed to start', error);
     void vscode.window.showErrorMessage(`Faces: the language server failed to start: ${error}`);
@@ -92,6 +97,8 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
 }
 
 async function stopClient(): Promise<void> {
+  javaCallHierarchy?.dispose();
+  javaCallHierarchy = undefined;
   const running = client;
   client = undefined;
   if (running) {

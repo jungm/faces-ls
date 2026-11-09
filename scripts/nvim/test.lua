@@ -47,8 +47,9 @@ log('completion money.', table.concat(labels, ', '))
 for _, case in ipairs({ { 'money bean', 14, col(14, '#{money.', 3) }, { 's:price tag', 12, col(12, 's:price', 3) },
                         { 'p:inputText tag', 11, col(11, 'p:inputText', 3) } }) do
   local result = request('textDocument/definition', case[2], case[3])
-  local location = result and (result[1] or result)
-  log('definition ' .. case[1], location and (location.uri or location.targetUri):gsub('.*/', '') .. ':' .. location.range.start.line or 'nothing')
+  local location = result and (result[1] or (result.uri and result))
+  log('definition ' .. case[1], location and (location.uri or location.targetUri):gsub('.*/', '') .. ':'
+    .. (location.range or location.targetSelectionRange).start.line or 'nothing')
 end
 
 -- hover
@@ -76,6 +77,31 @@ for i = 1, #data, 5 do
   end
 end
 log('semantic tokens line 15', table.concat(decoded, ' '))
+
+-- call hierarchy of Java methods through faces-ls: jdtls' callers plus the Facelets files whose EL calls them
+-- the cursor goes on the first match of `needle`, `delta` characters in
+local function call_hierarchy(label, file, needle, delta)
+  local java_lines = vim.fn.readfile(file)
+  local line, character
+  for i, l in ipairs(java_lines) do
+    local c = l:find(needle, 1, true)
+    if c and not line then line, character = i - 1, c - 1 + delta end
+  end
+  local prepared = client:request_sync('textDocument/prepareCallHierarchy',
+    { textDocument = { uri = vim.uri_from_fname(file) }, position = { line = line, character = character } }, 30000, buf)
+  local item = prepared and prepared.result and prepared.result[1]
+  log('call hierarchy ' .. label, item and item.name or 'nothing')
+  if not item then return end
+  local incoming = client:request_sync('callHierarchy/incomingCalls', { item = item }, 60000, buf)
+  for _, call in ipairs(incoming and incoming.result or {}) do
+    log('  caller', call.from.name, call.from.uri:gsub('.*/', ''), #call.fromRanges .. ' call(s)')
+  end
+  local outgoing = client:request_sync('callHierarchy/outgoingCalls', { item = item }, 60000, buf)
+  for _, call in ipairs(outgoing and outgoing.result or {}) do
+    log('  callee', call.to.name)
+  end
+end
+call_hierarchy('getCustomer', root .. '/src/main/java/org/example/web/OrderBean.java', 'String getCustomer()', 8)
 
 local f = io.open(vim.env.OUT, 'w'); f:write(table.concat(out, '\n') .. '\n'); f:close()
 vim.cmd('qa!')

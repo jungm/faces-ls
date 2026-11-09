@@ -32,7 +32,9 @@
     "xhtml"
   ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "workspaceContains:**/*.xhtml"
+  ],
   "contributes": {
     "languages": [
       {

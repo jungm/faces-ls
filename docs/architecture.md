@@ -99,8 +99,15 @@ Java → EL features:
 - **Rename** a getter/method/bean in Java so EL updates too: try a JDT rename participant
   (`org.eclipse.ltk.core.refactoring.renameParticipants`) in faces-jdt. **Not yet verified** that jdtls calls
   participants.
-- **Find usages** from Java into `.xhtml`: jdtls' `references` won't include them. faces-ls probably has to be
-  registered for the Java language too, next to jdtls, to answer `references` for Java positions.
+- **Call hierarchy** of Java members with Facelets callers. faces-ls answers `prepareCallHierarchy` and the
+  incoming/outgoing calls for `.java` and `jdt://` URIs: faces-jdt runs jdtls' own `CallHierarchyHandler` (internal
+  to jdtls, called reflectively) and adds the member each item denotes to its `data`; faces-ls appends the Facelets
+  files whose EL uses that member (properties through getter or setter, method expressions and calls, constants,
+  imported and taglib functions). Clients ask one call hierarchy provider per document, so they have to send Java
+  call hierarchy requests to faces-ls instead of jdtls while faces-ls reaches faces-jdt, which it announces with the
+  `faces/javaStatus` notification (`{"connected": boolean}`). vscode-faces registers such a provider after jdtls'.
+- **Find usages** from Java into `.xhtml`: jdtls' `references` won't include them. A client could merge faces-ls'
+  answer for Java positions into jdtls' (references from all providers are merged in VS Code).
 
 ## Communication between faces-ls and jdtls
 
