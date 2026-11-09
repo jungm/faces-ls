@@ -1,0 +1,15 @@
+<ui:component xmlns="http://www.w3.org/1999/xhtml"
+              xmlns:h="jakarta.faces.html"
+              xmlns:ui="jakarta.faces.facelets"
+              xmlns:cc="jakarta.faces.composite">
+    <cc:interface>
+        <cc:attribute name="user" type="org.example.demo.User" required="true"/>
+        <cc:attribute name="showEmail" type="java.lang.Boolean" default="false"/>
+    </cc:interface>
+    <cc:implementation>
+        <div class="card">
+            <h:outputText value="#{cc.attrs.user.name}"/>
+            <h:outputText value="#{cc.attrs.user.email}" rendered="#{cc.attrs.showEmail}"/>
+        </div>
+    </cc:implementation>
+</ui:component>

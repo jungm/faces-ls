@@ -1,0 +1,19 @@
+#!/bin/sh
+# Starts the Faces language server on stdin/stdout. Needs Java 21 or newer: JAVA_HOME, or java on PATH.
+# Extra JVM options can be passed in FACES_LS_JAVA_OPTS.
+self=$0
+while [ -h "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+home=$(cd "$(dirname "$self")/.." && pwd)
+if [ -n "$JAVA_HOME" ]; then
+  java="$JAVA_HOME/bin/java"
+else
+  java=java
+fi
+# shellcheck disable=SC2086
+exec "$java" -XX:+UseSerialGC -Xss2m $FACES_LS_JAVA_OPTS -jar "$home/lib/faces-ls.jar" "$@"

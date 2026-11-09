@@ -1,0 +1,8 @@
+/build/
+target/
+
+# Eclipse metadata written by jdtls
+.project
+.classpath
+.settings/
+.factorypath

@@ -1,0 +1,12 @@
+<ui:component xmlns="http://www.w3.org/1999/xhtml"
+              xmlns:h="jakarta.faces.html"
+              xmlns:ui="jakarta.faces.facelets"
+              xmlns:cc="jakarta.faces.composite">
+    <cc:interface shortDescription="Shows an amount with its currency">
+        <cc:attribute name="amount" type="java.math.BigDecimal" required="true"/>
+        <cc:attribute name="label" type="java.lang.String"/>
+    </cc:interface>
+    <cc:implementation>
+        <span class="price">#{cc.attrs.label} #{money.format(cc.attrs.amount)}</span>
+    </cc:implementation>
+</ui:component>

@@ -1,0 +1,39 @@
+<ui:composition xmlns="http://www.w3.org/1999/xhtml"
+                xmlns:h="jakarta.faces.html"
+                xmlns:f="jakarta.faces.core"
+                xmlns:ui="jakarta.faces.facelets"
+                xmlns:c="jakarta.tags.core"
+                xmlns:fn="jakarta.tags.functions"
+                xmlns:comp="jakarta.faces.composite/components"
+                template="/WEB-INF/templates/layout.xhtml">
+    <ui:define name="content">
+        <h:form id="userForm">
+            <h:inputText id="filter" value="#{userBean.filter}">
+                <f:ajax event="keyup" render="table"/>
+            </h:inputText>
+
+            <h:dataTable id="table" value="#{userBean.users}" var="u"
+                         rendered="#{not empty userBean.users and fn:length(userBean.users) gt 0}">
+                <h:column>
+                    <f:facet name="header">Name</f:facet>
+                    <comp:userCard user="#{u}" showEmail="#{u.admin}"/>
+                </h:column>
+                <h:column>
+                    #{u.birthday.year} (#{u.roles.size()} roles)
+                    <h:commandButton value="Delete" action="#{userBean.delete(u)}"/>
+                </h:column>
+            </h:dataTable>
+
+            <h:outputText value="#{msg['users.empty']}" rendered="#{empty userBean.users}"/>
+            <p>Total: #{userBean.count()} users, page size #{appSettings.title}</p>
+
+            <h:inputText id="name" value="#{userBean.current.name}" required="true"/>
+            <h:message for="name"/>
+            <h:commandButton value="Save" action="#{userBean.save}"/>
+            <h:outputText value="#{userBean.unknownProperty}"/>
+        </h:form>
+        <script>
+            function hello() { return 'world'; }
+        </script>
+    </ui:define>
+</ui:composition>

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:h="jakarta.faces.html"
+      xmlns:p="primefaces"
+      xmlns:s="http://example.org/shared"
+      xmlns:sc="jakarta.faces.composite/shared">
+<h:head>
+    <title>#{labels['order.title']}</title>
+</h:head>
+<h:body>
+    <h:form id="order">
+        <p:inputText id="customer" value="#{orderBean.customer}" placeholder="Name"/>
+        <s:price amount="#{orderBean.total}" label="#{labels['order.total']}"/>
+        <sc:price amount="#{orderBean.total}"/>
+        <h:outputText value="#{s:upper(orderBean.customer)} #{money.defaultCurrency} #{money.format(orderBean.total)}"/>
+        <h:outputText value="#{labels['order.missing']} #{money.nothing}"/>
+
+        <p:panel id="details" header="Details" widgetVar="detailsPanel">
+            <div class="row">
+                <p:inputText id="note" value="#{orderBean.customer}"/>
+                <p:commandButton id="apply" value="Apply" process="@this @parent" update="@form:@child(0) msgs @widgetVar(detailsPanel)">
+                    <p:ajax event="dblclick" update="@next"/>
+                </p:commandButton>
+                <p:message id="msgs" for="note"/>
+            </div>
+        </p:panel>
+    </h:form>
+</h:body>
+</html>

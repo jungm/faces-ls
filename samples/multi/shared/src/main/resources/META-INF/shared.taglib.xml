@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<facelet-taglib xmlns="https://jakarta.ee/xml/ns/jakartaee" version="4.0">
+    <namespace>http://example.org/shared</namespace>
+    <composite-library-name>shared</composite-library-name>
+    <function>
+        <description>Upper-cases a string.</description>
+        <function-name>upper</function-name>
+        <function-class>org.example.shared.Strings</function-class>
+        <function-signature>java.lang.String upper(java.lang.String)</function-signature>
+    </function>
+</facelet-taglib>
