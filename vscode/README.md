@@ -1,7 +1,7 @@
 # Faces for Jakarta® EE
 
 Jakarta® Faces support for Visual Studio Code: Facelets pages (`*.xhtml`), Expression Language and Java
-integration, powered by the [Faces Language Server](https://github.com/jungm/faces-language-server).
+integration, powered by the [Faces Language Server](https://github.com/jungm/faces-support).
 
 ## Features
 
@@ -57,8 +57,7 @@ If another extension claims `*.xhtml`, set `"files.associations": { "*.xhtml": "
 
 ## Development
 
-Requirements: Node.js 20+, and a [faces-language-server](https://github.com/jungm/faces-language-server)
-checkout next to this repository, built with `mvn package` (or set `FACES_LS`).
+Requirements: Node.js 20+, and the language server built with `mvn package` in the repository root.
 
 ```sh
 npm install
@@ -67,7 +66,8 @@ npm run build       # bundles src/ into dist/extension.js
 npm run package     # faces-<version>.vsix
 ```
 
-`Run Extension` in VS Code (F5) starts an Extension Development Host on `samples/demo` of faces-language-server.
+`Run Extension` (F5, with the repository root opened in VS Code) starts an Extension Development Host on
+`samples/demo`.
 The language server is bundled into the extension, so a released extension always runs the server version it
 was built with.
 

@@ -1,7 +1,7 @@
 # faces-ls: a language server for Jakarta® Faces
 
 faces-ls is a language server for Facelets pages (`*.xhtml`) and Jakarta Expression Language. It works with any
-LSP client. For VS Code, use [vscode-faces](https://github.com/jungm/vscode-faces), which bundles faces-ls.
+LSP client. For VS Code, use the [Faces extension](https://github.com/jungm/faces-support/tree/main/vscode), which bundles faces-ls.
 
 It provides completion, hover, go to definition, diagnostics and code actions for tags, attributes and EL. EL type
 information (beans, properties, methods, Javadoc, navigation into Java) comes from **faces-jdt**, a bundle that runs

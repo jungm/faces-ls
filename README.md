@@ -3,7 +3,7 @@
 A language server for Jakarta® Faces: Facelets pages (`*.xhtml`), Expression Language and Java integration through
 jdtls. It works with any LSP client.
 
-- VS Code: [vscode-faces](https://github.com/jungm/vscode-faces)
+- VS Code: the extension in [vscode/](vscode)
 - Neovim, Helix and other LSP clients: see [docs/editors.md](docs/editors.md)
 
 ## Features
@@ -57,6 +57,7 @@ See [docs/architecture.md](docs/architecture.md). In short:
   still works.
 - `faces-ls-dist/` builds `faces-ls-<version>.zip` with launchers and both jars, for LSP clients without an
   extension of their own.
+- `vscode/` is the VS Code extension, which bundles both jars.
 
 ## Building
 
@@ -65,6 +66,17 @@ Requirements: JDK 21+, Maven.
 ```sh
 mvn package     # faces-ls/target/faces-ls.jar, faces-jdt/target/faces-jdt.jar, faces-ls-dist/target/faces-ls-<version>.zip
 ```
+
+The VS Code extension (Node.js 20+), after `mvn package`:
+
+```sh
+cd vscode
+npm install
+npm run server      # copies faces-ls.jar and faces-jdt.jar into vscode/server/
+npm run package     # vscode/faces-<version>.vsix
+```
+
+See [vscode/README.md](vscode/README.md#development) for more.
 
 ## Testing
 

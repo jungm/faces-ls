@@ -10,7 +10,7 @@ descriptions, bundled schemas and class names of these plugins:
 
 How each feature can be built with faces-ls and an editor extension:
 
-- **GR**: the editor extension's grammar (TextMate or Tree-sitter) and language configuration
+- **GR**: the editor extension's TextMate grammar and language configuration
 - **SN**: snippets
 - **LSP**: faces-ls, which knows the project's Java classpath
 - **X**: needs editor UI that LSP does not cover

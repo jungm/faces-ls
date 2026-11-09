@@ -7,7 +7,7 @@ list is in [intellij-faces-features.md](intellij-faces-features.md).
 
 ```
 Editor
- ├─ editor extension (e.g. vscode-faces)
+ ├─ editor extension (e.g. the VS Code extension in vscode/)
  │    ├─ Facelets language for *.xhtml: markup grammar with EL embedded
  │    ├─ snippets
  │    ├─ starts faces-ls
@@ -36,7 +36,7 @@ What a client has to provide (see [editors.md](editors.md) for plain LSP clients
   does this for every jar an extension lists under `contributes.javaExtensions`. faces-ls finds the bundle through
   the rendezvous directory next to the jar, or through `FACES_JDT_RENDEZVOUS` when the extension sets it.
 
-[vscode-faces](https://github.com/jungm/vscode-faces) bundles both jars, adds a TextMate grammar with EL injected
+The [VS Code extension](../vscode) bundles both jars, adds a TextMate grammar with EL injected
 into HTML, and lists faces-jdt as a Java extension.
 
 ### `faces-ls` (language server, `faces-ls/`)
@@ -105,7 +105,7 @@ Java → EL features:
   files whose EL uses that member (properties through getter or setter, method expressions and calls, constants,
   imported and taglib functions). Clients ask one call hierarchy provider per document, so they have to send Java
   call hierarchy requests to faces-ls instead of jdtls while faces-ls reaches faces-jdt, which it announces with the
-  `faces/javaStatus` notification (`{"connected": boolean}`). vscode-faces registers such a provider after jdtls'.
+  `faces/javaStatus` notification (`{"connected": boolean}`). The VS Code extension registers such a provider after jdtls'.
 - **Find usages** from Java into `.xhtml`: jdtls' `references` won't include them. A client could merge faces-ls'
   answer for Java positions into jdtls' (references from all providers are merged in VS Code).
 
