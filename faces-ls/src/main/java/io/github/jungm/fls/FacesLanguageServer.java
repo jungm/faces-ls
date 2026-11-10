@@ -793,6 +793,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public void didChangeWatchedFiles(DidChangeWatchedFilesParams params) {
+        boolean relevant = false;
         boolean configuration = false;
         boolean composites = false;
         for (FileEvent event : params.getChanges()) {
@@ -804,6 +805,10 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
                 LOG.log(Level.FINE, "not a file: " + uri, e);
                 continue;
             }
+            if (WebRoots.inSkippedDirectory(roots, file)) {
+                continue;
+            }
+            relevant = true;
             worker.execute(() -> index.fileChanged(file));
             String name = file.getFileName() == null ? "" : file.getFileName().toString();
             if (name.endsWith("faces-config.xml") || name.endsWith("web.xml") || name.endsWith(".taglib.xml")) {
@@ -811,6 +816,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             } else if (name.endsWith(".xhtml") && isCompositeComponent(file)) {
                 composites = true;
             }
+        }
+        if (!relevant) {
+            return;
         }
         boolean reloadConfiguration = configuration;
         boolean invalidateComposites = composites;

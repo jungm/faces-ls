@@ -55,6 +55,23 @@ public final class WebRoots {
         return SKIPPED_DIRECTORIES.contains(text) || text.startsWith(".");
     }
 
+    /**
+     * True when {@code file} lies in a skipped directory ({@code target}, {@code .git}, ...) below the workspace root
+     * that contains it, e.g. a resource a build copied to {@code target/classes}. Directories above the workspace
+     * root do not count, and a file outside all roots is never skipped.
+     */
+    public static boolean inSkippedDirectory(List<Path> workspaceRoots, Path file) {
+        Path normalized = file.toAbsolutePath().normalize();
+        Path parent = normalized.getParent();
+        for (Path root : workspaceRoots) {
+            Path base = root.toAbsolutePath().normalize();
+            if (parent != null && parent.startsWith(base) && insideSkipped(base, parent)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static boolean isWebRoot(Path dir) {
         return isMetaInfResources(dir) || endsWith(dir, List.of("src", "main", "webapp"))
                 || Files.isDirectory(dir.resolve("WEB-INF"));
