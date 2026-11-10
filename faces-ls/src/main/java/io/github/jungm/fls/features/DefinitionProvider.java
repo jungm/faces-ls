@@ -62,7 +62,8 @@ public final class DefinitionProvider {
         }
         Cursor cursor = Cursor.on(document, offset);
         if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE
-                && SearchExpressions.isSearchAttribute(cursor.element(), cursor.attribute().name())) {
+                && SearchExpressions.isSearchAttribute(cursor.element(),
+                        PassthroughElements.componentAttributeName(cursor.element(), cursor.attribute()))) {
             result.addAll(searchExpressionTargets(cursor.element(), cursor.attribute(), offset));
             return result;
         }
@@ -209,7 +210,7 @@ public final class DefinitionProvider {
         if (resolved.tag().fileUri() != null) {
             return new Location(resolved.tag().fileUri(), new Range(new Position(0, 0), new Position(0, 0)));
         }
-        return descriptorLocation(resolved.library(), element.localName(), null);
+        return descriptorLocation(resolved.library(), resolved.tag().name(), null);
     }
 
     /** The {@code cc:attribute} of a composite component, or else the attribute in the taglib descriptor. */
@@ -218,14 +219,17 @@ public final class DefinitionProvider {
         if (resolved.tag() == null) {
             return null;
         }
-        TagLibrary.AttributeDef definition = resolved.tag().attribute(attribute.name());
+        TagLibrary.AttributeDef definition = resolved.attribute(element, attribute);
+        if (definition == null && resolved.passthrough() != null) {
+            return null;
+        }
         if (resolved.tag().fileUri() != null) {
             if (definition == null || definition.offset() < 0) {
                 return null;
             }
             return atOffset(resolved.tag().fileUri(), definition.offset(), definition.name().length());
         }
-        return descriptorLocation(resolved.library(), element.localName(), definition == null ? null : definition.name());
+        return descriptorLocation(resolved.library(), resolved.tag().name(), definition == null ? null : definition.name());
     }
 
     private static Location descriptorLocation(TagLibrary library, String tagName, String attributeName) {

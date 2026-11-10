@@ -2,6 +2,7 @@ package io.github.jungm.fls.features;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -199,18 +200,13 @@ public final class CompletionProvider {
             }
         }
         Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
-        if (resolved.tag() != null) {
+        if (PassthroughElements.isMarkup(element)) {
+            items.addAll(passthroughAttributeItems(cursor, offset, present));
+        } else if (resolved.tag() != null) {
             for (TagLibrary.AttributeDef attribute : resolved.tag().attributes()) {
-                if (present.contains(attribute.name())) {
-                    continue;
+                if (!present.contains(attribute.name())) {
+                    items.add(attributeItem(attribute.name(), attribute, cursor, offset));
                 }
-                CompletionItem item = item(attribute.name(), CompletionItemKind.Property, cursor.replaceStart(), offset,
-                        attribute.name() + "=\"$1\"");
-                item.setDetail((attribute.required() ? "required " : "") + (attribute.type() != null ? attribute.type() : ""));
-                item.setDocumentation(markdown(attributeDoc(attribute)));
-                item.setInsertTextFormat(InsertTextFormat.Snippet);
-                item.setSortText((attribute.required() ? "0" : "1") + attribute.name());
-                items.add(item);
             }
         }
         // declarations for the predefined prefixes that are not declared yet
@@ -225,6 +221,85 @@ public final class CompletionProvider {
             }
         }
         return items;
+    }
+
+    private CompletionItem attributeItem(String name, TagLibrary.AttributeDef attribute, Cursor cursor, int offset) {
+        CompletionItem item = item(name, CompletionItemKind.Property, cursor.replaceStart(), offset, name + "=\"$1\"");
+        item.setDetail((attribute.required() ? "required " : "") + (attribute.type() != null ? attribute.type() : ""));
+        item.setDocumentation(markdown(attributeDoc(attribute)));
+        item.setInsertTextFormat(InsertTextFormat.Snippet);
+        item.setSortText((attribute.required() ? "0" : "1") + name);
+        return item;
+    }
+
+    /**
+     * {@code jsf:} attributes of a plain markup element: those of the tag it is processed as (or would be once it has
+     * one), and those that select another tag, such as {@code jsf:action} turning {@code <a>} into
+     * {@code h:commandLink}. Without a declared prefix for {@code jakarta.faces} they are offered once the typed text
+     * matches a predefined one, whose declaration they add.
+     */
+    private List<CompletionItem> passthroughAttributeItems(Cursor cursor, int offset, Set<String> present) {
+        XmlElement element = cursor.element();
+        String prefix = null;
+        TextEdit declaration = null;
+        for (Map.Entry<String, String> declared : Tags.declaredPrefixes(element).entrySet()) {
+            if (Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(declared.getValue()))) {
+                prefix = declared.getKey();
+                break;
+            }
+        }
+        if (prefix == null) {
+            String typed = cursor.prefix();
+            for (NamespaceDeclarations.Predefined predefined : namespaces.available(element).values()) {
+                String candidate = predefined.prefix() + ":";
+                if (!typed.isEmpty() && Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(predefined.uri()))
+                        && (typed.startsWith(candidate) || candidate.startsWith(typed))) {
+                    declaration = namespaces.declare(predefined.prefix(), predefined.uri());
+                    prefix = declaration == null ? null : predefined.prefix();
+                    break;
+                }
+            }
+            if (prefix == null) {
+                return List.of();
+            }
+        }
+        Map<String, CompletionItem> items = new LinkedHashMap<>();
+        PassthroughElements.Target target = PassthroughElements.targetOf(element);
+        TagLibrary.TagDef tag = tagOf(target);
+        if (tag != null) {
+            for (TagLibrary.AttributeDef attribute : tag.attributes()) {
+                if (!attribute.name().equals(PassthroughElements.ELEMENT_NAME)) {
+                    items.putIfAbsent(attribute.name(), attributeItem(prefix + ":" + attribute.name(), attribute, cursor, offset));
+                }
+            }
+        }
+        for (PassthroughElements.Rule rule : PassthroughElements.rules(element)) {
+            TagLibrary.TagDef selected = rule.facesAttribute() ? tagOf(rule.target()) : null;
+            TagLibrary.AttributeDef attribute = selected == null ? null : selected.attribute(rule.attribute());
+            if (attribute != null && !items.containsKey(attribute.name())) {
+                CompletionItem item = attributeItem(prefix + ":" + attribute.name(), attribute, cursor, offset);
+                item.setDetail("processed as " + rule.target().qualifiedName());
+                items.put(attribute.name(), item);
+            }
+        }
+        List<CompletionItem> result = new ArrayList<>();
+        for (CompletionItem item : items.values()) {
+            if (present.contains(item.getLabel())) {
+                continue;
+            }
+            if (declaration != null) {
+                item.setAdditionalTextEdits(List.of(declaration));
+                item.setDetail(item.getDetail() + " · adds xmlns:" + prefix);
+                item.setSortText("3" + item.getLabel());
+            }
+            result.add(item);
+        }
+        return result;
+    }
+
+    private TagLibrary.TagDef tagOf(PassthroughElements.Target target) {
+        TagLibrary library = analyzer.project().taglibs().library(target.namespace());
+        return library == null ? null : library.tags().get(target.localName());
     }
 
     static String attributeDoc(TagLibrary.AttributeDef attribute) {
@@ -283,7 +358,7 @@ public final class CompletionProvider {
             return items;
         }
 
-        if (SearchExpressions.isSearchAttribute(element, name)) {
+        if (SearchExpressions.isSearchAttribute(element, PassthroughElements.componentAttributeName(element, attribute))) {
             return searchExpressionItems(element, start, prefix, offset);
         }
 
@@ -302,7 +377,7 @@ public final class CompletionProvider {
         }
 
         Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
-        TagLibrary.AttributeDef definition = resolved.tag() == null ? null : resolved.tag().attribute(name);
+        TagLibrary.AttributeDef definition = resolved.attribute(element, attribute);
         if (definition != null && definition.type() != null
                 && (definition.type().equals("boolean") || definition.type().equals("java.lang.Boolean"))) {
             items.add(valueItem("true", start, offset, CompletionItemKind.Value, null));
@@ -517,14 +592,11 @@ public final class CompletionProvider {
         if (site.attribute() == null) {
             return false;
         }
-        Tags.Resolved resolved = Tags.resolve(analyzer.project(), site.element());
-        if (resolved.tag() != null) {
-            TagLibrary.AttributeDef definition = resolved.tag().attribute(site.attribute().name());
-            if (definition != null && definition.methodSignature() != null) {
-                return true;
-            }
+        TagLibrary.AttributeDef definition = Tags.resolve(analyzer.project(), site.element()).attribute(site.element(), site.attribute());
+        if (definition != null && definition.methodSignature() != null) {
+            return true;
         }
-        String name = site.attribute().name();
+        String name = PassthroughElements.componentAttributeName(site.element(), site.attribute());
         return name.equals("action") || name.equals("actionListener") || name.equals("listener")
                 || name.equals("valueChangeListener") || name.equals("validator");
     }

@@ -38,7 +38,7 @@ public final class ComponentModel {
         if (Namespaces.FACELETS.equals(namespace)) {
             return Set.of("repeat", "component", "fragment").contains(element.localName());
         }
-        if (isPassthroughElement(element)) {
+        if (PassthroughElements.isPassthroughElement(element)) {
             return true;
         }
         Tags.Resolved resolved = Tags.resolve(project, element);
@@ -51,16 +51,6 @@ public final class ComponentModel {
         }
         return resolved.library().composite() || resolved.tag().componentType() != null
                 || Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(resolved.namespace()));
-    }
-
-    static boolean isPassthroughElement(XmlElement element) {
-        for (XmlAttribute attribute : element.attributes()) {
-            if (!attribute.prefix().isEmpty() && !attribute.prefix().equals("xmlns")
-                    && Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(element.namespaceFor(attribute.prefix())))) {
-                return true;
-            }
-        }
-        return false;
     }
 
     public boolean isNamingContainer(XmlElement element) {
@@ -101,20 +91,21 @@ public final class ComponentModel {
         return element.attribute("var") != null || element.localName().equals("repeat");
     }
 
-    /** The component id: {@code id}, or {@code jsf:id} on passthrough elements. */
+    /**
+     * The component id: {@code id}, or {@code jsf:id} on passthrough elements, whose plain {@code id} is passed through
+     * to the markup and does not name the component.
+     */
     public static String idOf(XmlElement element) {
         XmlAttribute attribute = idAttribute(element);
         return attribute == null || attribute.value() == null ? null : attribute.value().trim();
     }
 
     public static XmlAttribute idAttribute(XmlElement element) {
-        XmlAttribute id = element.attribute("id");
-        if (id != null) {
-            return id;
+        if (!PassthroughElements.isPassthroughElement(element)) {
+            return element.attribute("id");
         }
         for (XmlAttribute attribute : element.attributes()) {
-            if (attribute.localName().equals("id") && !attribute.prefix().isEmpty()
-                    && Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(element.namespaceFor(attribute.prefix())))) {
+            if (attribute.localName().equals("id") && PassthroughElements.isFacesAttribute(element, attribute)) {
                 return attribute;
             }
         }

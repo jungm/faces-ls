@@ -146,7 +146,7 @@ public final class SemanticTokensProvider {
             if (attribute.name().equals("widgetVar")
                     || attribute == ComponentModel.idAttribute(element) && components.isComponent(element)) {
                 name(attribute.value(), attribute.valueStart(), VARIABLE, DECLARATION);
-            } else if (SearchExpressions.isSearchAttribute(element, attribute.name())) {
+            } else if (SearchExpressions.isSearchAttribute(element, PassthroughElements.componentAttributeName(element, attribute))) {
                 searchExpressions(attribute);
             }
         }

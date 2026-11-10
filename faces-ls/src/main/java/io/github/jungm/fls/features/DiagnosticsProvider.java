@@ -14,8 +14,8 @@ import io.github.jungm.fls.xml.XmlAttribute;
 import io.github.jungm.fls.xml.XmlElement;
 
 /**
- * Problems in a Facelets document: unknown tags and attributes of known libraries, missing required attributes,
- * unknown tag libraries, EL syntax errors and unresolved EL names.
+ * Problems in a Facelets document: unknown tags and attributes of known libraries (also {@code jsf:} attributes of
+ * passthrough elements), missing required attributes, unknown tag libraries, EL syntax errors and unresolved EL names.
  */
 public final class DiagnosticsProvider {
     private static final String SOURCE = "faces";
@@ -53,6 +53,10 @@ public final class DiagnosticsProvider {
 
     private void checkElement(XmlElement element, List<Diagnostic> result) {
         checkNamespaceDeclarations(element, result);
+        if (PassthroughElements.isMarkup(element)) {
+            checkPassthroughElement(element, result);
+            return;
+        }
         if (element.name().isEmpty() || element.prefix().isEmpty() && element.namespace() == null) {
             return;
         }
@@ -61,6 +65,12 @@ public final class DiagnosticsProvider {
             result.add(diagnostic("Namespace prefix '" + element.prefix() + "' is not declared", element.nameStart(),
                     element.nameStart() + element.prefix().length(), DiagnosticSeverity.Error));
             return;
+        }
+        for (XmlAttribute attribute : element.attributes()) {
+            if (PassthroughElements.isFacesAttribute(element, attribute)) {
+                result.add(diagnostic("Attributes in the jakarta.faces namespace are only allowed on plain HTML elements",
+                        attribute.nameStart(), attribute.nameEnd(), DiagnosticSeverity.Warning));
+            }
         }
         Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
         if (resolved.library() == null) {
@@ -83,6 +93,28 @@ public final class DiagnosticsProvider {
                         attribute.nameEnd(), DiagnosticSeverity.Warning));
             }
         }
+        checkRequiredAttributes(element, result);
+    }
+
+    /** {@code jsf:} attributes of an element such as {@code <input jsf:value="...">}, against the tag it stands for. */
+    private void checkPassthroughElement(XmlElement element, List<Diagnostic> result) {
+        Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
+        if (resolved.tag() == null) {
+            return;
+        }
+        if (resolved.library().attributesComplete()) {
+            for (XmlAttribute attribute : element.attributes()) {
+                if (PassthroughElements.isFacesAttribute(element, attribute) && resolved.attribute(element, attribute) == null) {
+                    result.add(diagnostic("Unknown attribute '" + attribute.localName() + "' for <" + element.name() + ">, "
+                            + "processed as <" + resolved.tagName(element) + ">", attribute.nameStart(), attribute.nameEnd(),
+                            DiagnosticSeverity.Warning));
+                }
+            }
+        }
+        checkRequiredAttributes(element, result);
+    }
+
+    private void checkRequiredAttributes(XmlElement element, List<Diagnostic> result) {
         for (TagLibrary.AttributeDef attribute : RequiredAttributes.missing(analyzer.project(), element)) {
             Diagnostic missing = diagnostic("Missing required attribute '" + attribute.name() + "'", element.nameStart(),
                     element.nameEnd(), DiagnosticSeverity.Error);

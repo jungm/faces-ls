@@ -43,7 +43,12 @@ public final class HoverProvider {
                     return null;
                 }
                 StringBuilder text = new StringBuilder("**").append(cursor.element().name()).append("**");
-                text.append(resolved.library().composite() ? " — composite component" : " — " + resolved.library().namespace());
+                if (resolved.passthrough() != null) {
+                    text.append(" — passthrough element, processed as `").append(resolved.tagName(cursor.element()))
+                            .append("` (").append(resolved.library().namespace()).append(')');
+                } else {
+                    text.append(resolved.library().composite() ? " — composite component" : " — " + resolved.library().namespace());
+                }
                 text.append("\n\n");
                 if (resolved.tag().description() != null) {
                     text.append(resolved.tag().description()).append("\n\n");
@@ -60,11 +65,11 @@ public final class HoverProvider {
                 if (resolved.tag() == null) {
                     return null;
                 }
-                TagLibrary.AttributeDef attribute = resolved.tag().attribute(cursor.attribute().name());
+                TagLibrary.AttributeDef attribute = resolved.attribute(cursor.element(), cursor.attribute());
                 if (attribute == null) {
                     return null;
                 }
-                String text = "**" + attribute.name() + "** — attribute of `" + cursor.element().name() + "`\n\n"
+                String text = "**" + attribute.name() + "** — attribute of `" + resolved.tagName(cursor.element()) + "`\n\n"
                         + CompletionProvider.attributeDoc(attribute);
                 return hover(text, cursor.attribute().nameStart(), cursor.attribute().nameEnd());
             }
@@ -79,7 +84,8 @@ public final class HoverProvider {
 
     /** What the search expression segment under the cursor resolves to. */
     private Hover searchExpressionHover(Cursor cursor, int offset) {
-        if (!SearchExpressions.isSearchAttribute(cursor.element(), cursor.attribute().name())) {
+        if (!SearchExpressions.isSearchAttribute(cursor.element(),
+                PassthroughElements.componentAttributeName(cursor.element(), cursor.attribute()))) {
             return null;
         }
         SearchExpressions.Hit hit = SearchExpressions.at(

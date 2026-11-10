@@ -17,18 +17,49 @@ final class Tags {
     private Tags() {
     }
 
-    record Resolved(String namespace, TagLibrary library, TagLibrary.TagDef tag) {
+    /**
+     * @param passthrough the tag a passthrough element ({@code <input jsf:value="...">}) is processed as, or null when
+     *                    the element is that tag itself
+     */
+    record Resolved(String namespace, TagLibrary library, TagLibrary.TagDef tag, PassthroughElements.Target passthrough) {
+        /**
+         * The definition of an attribute of the element. On passthrough elements only {@code jsf:} attributes are
+         * attributes of the tag; the others are rendered as they are.
+         */
+        TagLibrary.AttributeDef attribute(XmlElement element, XmlAttribute attribute) {
+            if (tag == null) {
+                return null;
+            }
+            if (passthrough != null) {
+                return PassthroughElements.isFacesAttribute(element, attribute) ? tag.attribute(attribute.localName()) : null;
+            }
+            return tag.attribute(attribute.name());
+        }
+
+        /** The tag's name as written in a page: the element's name, or the target tag of a passthrough element. */
+        String tagName(XmlElement element) {
+            return passthrough != null ? passthrough.qualifiedName() : element.name();
+        }
     }
 
-    /** The library and tag definition for an element; {@code library} is null for plain (X)HTML markup. */
+    /**
+     * The library and tag definition for an element; {@code library} is null for plain (X)HTML markup. Passthrough
+     * elements resolve to the tag they are processed as.
+     */
     static Resolved resolve(ProjectModel project, XmlElement element) {
         String namespace = element.namespace();
         if (namespace == null || Namespaces.XHTML.equals(namespace)) {
-            return new Resolved(namespace, null, null);
+            PassthroughElements.Target target = PassthroughElements.target(element);
+            if (target == null) {
+                return new Resolved(namespace, null, null, null);
+            }
+            TagLibrary library = project.taglibs().library(target.namespace());
+            TagLibrary.TagDef tag = library == null ? null : library.tags().get(target.localName());
+            return new Resolved(target.namespace(), library, tag, target);
         }
         TagLibrary library = project.taglibs().library(namespace);
         TagLibrary.TagDef tag = library == null ? null : library.tags().get(element.localName());
-        return new Resolved(namespace, library, tag);
+        return new Resolved(namespace, library, tag, null);
     }
 
     /** Whether the attribute's value is a Java class name: {@code type} of {@code cc:attribute} or of an import tag. */

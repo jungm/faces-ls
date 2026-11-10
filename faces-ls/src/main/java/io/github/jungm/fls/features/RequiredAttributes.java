@@ -33,6 +33,9 @@ final class RequiredAttributes {
         Set<String> exempt = NOT_REQUIRED.getOrDefault(Namespaces.canonical(resolved.namespace()) + ":" + element.localName(), Set.of());
         List<TagLibrary.AttributeDef> result = new ArrayList<>();
         for (TagLibrary.AttributeDef attribute : resolved.tag().attributes()) {
+            if (resolved.passthrough() != null && attribute.name().equals(PassthroughElements.ELEMENT_NAME)) {
+                continue;
+            }
             if (attribute.required() && !exempt.contains(attribute.name()) && !isSet(element, attribute.name())) {
                 result.add(attribute);
             }

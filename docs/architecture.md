@@ -60,6 +60,13 @@ source folders and the classpath is empty.
   - Attribute value completion: namespace URIs, view paths, component ids and search expressions, `f:ajax`
     events, Java class names for attributes that take a class (through faces-jdt), `true`/`false` for boolean
     attributes.
+- **Passthrough elements** (`features/PassthroughElements.java`): a plain HTML element with an attribute in the
+  `jakarta.faces` namespace (`<input type="email" jsf:value="...">`) is resolved to the tag the default
+  `TagDecorator` of the specification maps it to (`h:inputText`), or `jsf:element` when no row of the table matches.
+  Its `jsf:` attributes are attributes of that tag for completion, hover, definition and diagnostics; the other
+  attributes are passed through to the markup, so the component id is `jsf:id` only. `jsf:element` additionally
+  takes `id`, `rendered` and `binding`, which its taglib leaves out. Where Mojarra and MyFaces differ, the
+  specification and MyFaces decide (`<input type="button">` is `h:commandButton`).
 - **Project configuration**: `WEB-INF/faces-config.xml` of web roots, `META-INF/*faces-config.xml` of source
   folders, classpath directories and jars (resource bundles and `<managed-bean>` entries), web.xml context params.
 - **Web roots** (`project/WebRoots.java`): `src/main/webapp`, `WebContent`, `web`, `webapp` and

@@ -64,13 +64,40 @@ public final class TaglibRegistry {
                 TagLibrary library = TaglibXmlLoader.load(input, "Jakarta Faces 4.1 (" + name + ".taglib.xml)",
                         TaglibDescriptor.ofResource(resource));
                 if (library != null) {
-                    result.put(Namespaces.canonical(library.namespace()), library);
+                    result.put(Namespaces.canonical(library.namespace()), withComponentAttributes(library));
                 }
             } catch (IOException e) {
                 LOG.log(Level.WARNING, "cannot load bundled taglib " + resource, e);
             }
         }
         return result;
+    }
+
+    /**
+     * {@code jsf:element} with the attributes every component tag takes, which its taglib leaves out:
+     * {@code <span jsf:rendered="...">} is processed as {@code jsf:element}.
+     */
+    private static TagLibrary withComponentAttributes(TagLibrary library) {
+        TagLibrary.TagDef element = library.tags().get("element");
+        if (!Namespaces.PASSTHROUGH_ELEMENTS.equals(Namespaces.canonical(library.namespace())) || element == null) {
+            return library;
+        }
+        List<TagLibrary.AttributeDef> attributes = new ArrayList<>(List.of(
+                new TagLibrary.AttributeDef("id", "The component identifier for this component. This value must be "
+                        + "unique within the closest parent component that is a naming container.", false,
+                        "java.lang.String", null, null, -1),
+                new TagLibrary.AttributeDef("rendered", "Flag indicating whether or not this component should be "
+                        + "rendered (during Render Response Phase), or processed on any subsequent form submit.",
+                        false, "boolean", null, "true", -1),
+                new TagLibrary.AttributeDef("binding", "The ValueExpression linking this component to a property in a "
+                        + "backing bean.", false, "jakarta.faces.component.UIComponent", null, null, -1)));
+        attributes.addAll(element.attributes());
+        Map<String, TagLibrary.TagDef> tags = new LinkedHashMap<>(library.tags());
+        tags.put("element", new TagLibrary.TagDef(element.name(), element.description(), List.copyOf(attributes),
+                element.fileUri(), element.componentType()));
+        return new TagLibrary(library.namespace(), library.source(), library.composite(), library.attributesComplete(),
+                Map.copyOf(tags), library.functions(), library.description(), library.compositeLibraryName(),
+                library.descriptor());
     }
 
     /**
