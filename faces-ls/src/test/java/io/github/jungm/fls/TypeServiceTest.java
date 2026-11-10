@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -85,12 +87,47 @@ class TypeServiceTest {
     }
 
     @Test
-    void invalidateDropsCachedAnswers() {
-        jdt.type("a.Order", List.of(), List.of(), List.of());
-        types.info("a.Order");
+    void invalidateServesThePreviousAnswerWhileAskingAgain() throws InterruptedException {
+        AtomicInteger revalidations = new AtomicInteger();
+        types = new TypeService(jdt.client(), workspace.toString(), revalidations::incrementAndGet);
+        jdt.type("a.Order", List.of(), List.of(), List.of("java.lang.String getCustomer()"));
+        assertTrue(types.members(JType.of("a.Order")).properties().containsKey("customer"));
+
+        jdt.type("a.Order", List.of(), List.of(), List.of("java.lang.String getSupplier()")).hold("type", params -> true);
         types.invalidate();
-        types.info("a.Order");
+        assertTrue(types.members(JType.of("a.Order")).properties().containsKey("customer"));
+        await(() -> jdt.requests("type") == 2, "type asked for again");
+        assertEquals(0, revalidations.get());
+
+        jdt.release("type");
+        await(() -> revalidations.get() == 1, "revalidation notified");
+        assertTrue(types.members(JType.of("a.Order")).properties().containsKey("supplier"));
         assertEquals(2, jdt.requests("type"));
+    }
+
+    @Test
+    void unansweredRevalidationKeepsThePreviousAnswerAndDoesNotNotify() throws InterruptedException {
+        AtomicInteger revalidations = new AtomicInteger();
+        types = new TypeService(jdt.client(), workspace.toString(), revalidations::incrementAndGet);
+        jdt.type("a.Order", List.of(), List.of(), List.of("java.lang.String getCustomer()"));
+        assertNotNull(types.info("a.Order"));
+
+        jdt.failing("a.Order");
+        types.invalidate();
+        assertNotNull(types.info("a.Order"));
+        await(() -> jdt.requests("type") == 2, "type asked for again");
+        Thread.sleep(100);
+        assertEquals(0, revalidations.get());
+        // the next lookup asks again
+        assertNotNull(types.info("a.Order"));
+        await(() -> jdt.requests("type") == 3, "type asked for once more");
+    }
+
+    private static void await(BooleanSupplier condition, String what) throws InterruptedException {
+        for (int i = 0; i < 200 && !condition.getAsBoolean(); i++) {
+            Thread.sleep(25);
+        }
+        assertTrue(condition.getAsBoolean(), what);
     }
 
     /** Expectations as {@code java.beans.Introspector} reports them for the same methods. */

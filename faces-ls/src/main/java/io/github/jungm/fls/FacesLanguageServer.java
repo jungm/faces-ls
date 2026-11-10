@@ -461,7 +461,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
                 LOG.log(Level.FINE, "semantic token refresh failed", error);
                 return null;
             });
-        }, 300, TimeUnit.MILLISECONDS);
+        }, 100, TimeUnit.MILLISECONDS);
     }
 
     private void onJavaChanged() {

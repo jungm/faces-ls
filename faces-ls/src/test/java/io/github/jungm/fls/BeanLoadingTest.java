@@ -1,6 +1,7 @@
 package io.github.jungm.fls;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Files;
@@ -48,6 +49,30 @@ class BeanLoadingTest {
             assertEquals(2, jdt.requests("beans"));
             assertEquals(List.of("orderBean"), names(project.beans()));
             await(() -> changes.get() == 1, "change notified");
+        }
+    }
+
+    @Test
+    void previousBeansAreServedWhileTheSearchRunsAgain() throws Exception {
+        Files.writeString(workspace.resolve("pom.xml"), "<project/>");
+        AtomicInteger changes = new AtomicInteger();
+        try (FakeJdt jdt = new FakeJdt(workspace, workspace.resolve("rendezvous"))) {
+            jdt.bean("orderBean", "org.example.OrderBean");
+            ProjectModel project = new ProjectModel(workspace, jdt.client(), changes::incrementAndGet);
+            project.refresh();
+            project.beans();
+            await(project::beansLoaded, "beans loaded");
+            await(() -> changes.get() == 1, "change notified");
+
+            jdt.bean("customerBean", "org.example.CustomerBean").hold("beans", params -> true);
+            project.invalidateJava();
+            assertEquals(List.of("orderBean"), names(project.beans()));
+            assertFalse(project.beansLoaded());
+
+            jdt.release("beans");
+            await(project::beansLoaded, "beans loaded again");
+            assertEquals(List.of("orderBean", "customerBean"), names(project.beans()));
+            await(() -> changes.get() == 2, "change notified again");
         }
     }
 

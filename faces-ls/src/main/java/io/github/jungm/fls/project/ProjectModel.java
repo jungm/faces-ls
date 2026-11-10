@@ -52,9 +52,11 @@ public final class ProjectModel {
     private volatile List<Path> webRoots = List.of();
     private volatile FacesConfig facesConfig = new FacesConfig();
     private volatile long configurationVersion;
-    /** Guards {@link #beans}, {@link #beansLoading} and {@link #beansGeneration} together. */
+    /** Guards {@link #beans}, {@link #previousBeans}, {@link #beansLoading} and {@link #beansGeneration} together. */
     private final Object beanLock = new Object();
     private volatile List<Bean> beans;
+    /** The beans known before the last invalidation, served while the search runs again. */
+    private volatile List<Bean> previousBeans;
     private boolean beansLoading;
     private long beansGeneration;
     private volatile boolean discarded;
@@ -88,7 +90,11 @@ public final class ProjectModel {
         this.root = root;
         this.client = client;
         this.onChanged = onChanged;
-        this.types = new TypeService(client, root.toString());
+        this.types = new TypeService(client, root.toString(), () -> {
+            if (!discarded) {
+                onChanged.run();
+            }
+        });
     }
 
     public Path root() {
@@ -332,7 +338,8 @@ public final class ProjectModel {
     /**
      * Named beans from jdtls (CDI {@code @Named}, {@code @ManagedBean}) and faces-config managed beans. The jdtls
      * search runs in the background, since it can take seconds while jdtls indexes; until it completes this returns
-     * the faces-config beans only and {@link #beansLoaded()} is false. {@code onChanged} runs when it completes.
+     * the beans found before a Java change, or the faces-config beans only the first time, and {@link #beansLoaded()}
+     * is false. {@code onChanged} runs when it completes.
      */
     public List<Bean> beans() {
         List<Bean> cached = beans;
@@ -342,10 +349,12 @@ public final class ProjectModel {
         if (client == null || !client.connected()) {
             return withManagedBeans(new ArrayList<>());
         }
+        List<Bean> known;
         synchronized (beanLock) {
             startLoadingBeans(0);
+            known = previousBeans;
         }
-        return withManagedBeans(new ArrayList<>());
+        return known != null ? known : withManagedBeans(new ArrayList<>());
     }
 
     /** False while the bean search in jdtls is still running; unknown names must not be reported meanwhile. */
@@ -365,6 +374,9 @@ public final class ProjectModel {
 
     private void invalidateBeans() {
         synchronized (beanLock) {
+            if (beans != null) {
+                previousBeans = beans;
+            }
             beans = null;
             beansGeneration++;
         }

@@ -12,6 +12,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import io.github.jungm.fls.Threads;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -21,6 +27,10 @@ import com.google.gson.JsonObject;
  * Java type information from faces-jdt with type-argument substitution across the type hierarchy, so that
  * {@code List<User>.get(int)} yields {@code User}. Answers are cached until jdtls reports a Java change; a missing
  * answer (no connection, timeout, error) is not, so the next lookup asks again.
+ * <p>
+ * After a change, a type that was known before is answered from the previous answer at once while faces-jdt is asked
+ * again in the background ({@code onRevalidated} runs once fresh answers have arrived), so that a page opened after
+ * a Java edit does not wait for jdtls before it can be highlighted.
  */
 public final class TypeService {
 
@@ -67,18 +77,30 @@ public final class TypeService {
 
     private static final long TYPE_TIMEOUT_MILLIS = 8000;
 
+    /** Background lookups of types whose previous answer was served, for all projects. */
+    private static final ExecutorService REVALIDATION =
+            Executors.newFixedThreadPool(2, Threads.daemon("faces-ls-types"));
+
     private final JdtClient client;
     private final String projectPath;
+    private final Runnable onRevalidated;
     /**
      * The caches of the current generation. {@link #invalidate()} replaces them, and a computation stores its result
      * in the caches it started with, so that answers to requests sent before an invalidation are not cached.
      */
     private volatile Caches caches = new Caches();
+    /** Answers from before the last invalidation, served while the type is asked for again. */
+    private volatile Map<String, Optional<TypeInfo>> previous = Map.of();
 
     private static final class Caches {
         /** Answers of faces-jdt by type name: empty for types it reported as not existing. */
         final Map<String, Optional<TypeInfo>> infos = new ConcurrentHashMap<>();
         final Map<String, Members> members = new ConcurrentHashMap<>();
+        /** Types asked for in the background; removed again when faces-jdt gave no answer. */
+        final Set<String> revalidating = ConcurrentHashMap.newKeySet();
+        final AtomicInteger revalidationsRunning = new AtomicInteger();
+        /** Whether a background lookup got an answer since {@code onRevalidated} last ran. */
+        final AtomicBoolean revalidated = new AtomicBoolean();
     }
 
     /** Tracks whether every type lookup of a computation got an answer, i.e. whether its result may be cached. */
@@ -87,15 +109,25 @@ public final class TypeService {
     }
 
     public TypeService(JdtClient client, String projectPath) {
+        this(client, projectPath, () -> { });
+    }
+
+    /** @param onRevalidated runs when fresh answers have replaced previous ones served after an invalidation */
+    public TypeService(JdtClient client, String projectPath, Runnable onRevalidated) {
         this.client = client;
         this.projectPath = projectPath;
+        this.onRevalidated = onRevalidated;
     }
 
     public boolean available() {
         return client != null && client.connected();
     }
 
-    public void invalidate() {
+    /** Drops the cached answers; the ones that existed are served until faces-jdt has answered again. */
+    public synchronized void invalidate() {
+        Map<String, Optional<TypeInfo>> known = new HashMap<>(previous);
+        known.putAll(caches.infos);
+        previous = Map.copyOf(known);
         caches = new Caches();
     }
 
@@ -107,12 +139,11 @@ public final class TypeService {
 
     /** The description of a type, or null when it does not exist or faces-jdt gave no answer. */
     public TypeInfo info(String fqn) {
-        Optional<TypeInfo> answer = lookup(fqn);
-        return answer == null ? null : answer.orElse(null);
+        return info(fqn, new Lookups());
     }
 
     private TypeInfo info(String fqn, Lookups lookups) {
-        Optional<TypeInfo> answer = lookup(fqn);
+        Optional<TypeInfo> answer = lookup(fqn, lookups);
         if (answer == null) {
             lookups.complete = false;
             return null;
@@ -121,10 +152,11 @@ public final class TypeService {
     }
 
     /**
-     * The cached or requested answer for a type: empty when faces-jdt reported that the type does not exist, null when
-     * it gave no answer. One request returns the type together with all its supertypes, which are cached as well.
+     * The cached, previous or requested answer for a type: empty when faces-jdt reported that the type does not exist,
+     * null when it gave no answer. A previous answer leaves {@code lookups} incomplete, so that nothing computed from
+     * it is cached.
      */
-    private Optional<TypeInfo> lookup(String fqn) {
+    private Optional<TypeInfo> lookup(String fqn, Lookups lookups) {
         if (!available()) {
             return null;
         }
@@ -133,6 +165,44 @@ public final class TypeService {
         if (cached != null) {
             return cached;
         }
+        Optional<TypeInfo> known = previous.get(fqn);
+        if (known != null) {
+            lookups.complete = false;
+            revalidate(current, fqn);
+            return known;
+        }
+        return fetch(current, fqn);
+    }
+
+    private void revalidate(Caches current, String fqn) {
+        if (!current.revalidating.add(fqn)) {
+            return;
+        }
+        current.revalidationsRunning.incrementAndGet();
+        REVALIDATION.execute(() -> {
+            try {
+                if (caches == current && fetch(current, fqn) != null) {
+                    current.revalidated.set(true);
+                } else {
+                    current.revalidating.remove(fqn);
+                }
+            } catch (RuntimeException e) {
+                current.revalidating.remove(fqn);
+            } finally {
+                // one notification per burst; only answers make one, so a failing lookup does not loop
+                if (current.revalidationsRunning.decrementAndGet() == 0 && caches == current
+                        && current.revalidated.getAndSet(false)) {
+                    onRevalidated.run();
+                }
+            }
+        });
+    }
+
+    /**
+     * Asks faces-jdt for a type and caches the answer in {@code current}. One request returns the type together with
+     * all its supertypes, which are cached as well.
+     */
+    private Optional<TypeInfo> fetch(Caches current, String fqn) {
         JsonObject params = params();
         params.addProperty("fqn", fqn);
         Optional<JsonElement> response = client.query("type", params, TYPE_TIMEOUT_MILLIS);
