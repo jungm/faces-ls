@@ -3,6 +3,9 @@
 A language server for Jakarta® Faces: Facelets pages (`*.xhtml`), Expression Language and Java integration through
 jdtls. It works with any LSP client.
 
+Facelets is the only view declaration language it supports, by design. Faces lets applications plug in other view
+declaration languages (JSP was one until Faces 4.0), but pages written in them get no support.
+
 - VS Code: the extension in [vscode/](vscode)
 - Neovim, Helix and other LSP clients: see [docs/editors.md](docs/editors.md)
 

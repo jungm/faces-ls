@@ -3,6 +3,10 @@
 Jakarta® Faces support for LSP editors. [intellij-faces-features.md](intellij-faces-features.md) lists what
 IntelliJ's JSF/EL plugins offer and how each feature maps onto this design.
 
+Facelets is the only view declaration language in scope, by design: every page model, completion, diagnostic and
+semantic token is computed on Facelets markup. Other view declaration languages a Faces application plugs in are
+not supported.
+
 ## Overview
 
 ```

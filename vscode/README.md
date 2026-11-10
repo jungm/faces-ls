@@ -3,6 +3,9 @@
 Jakarta® Faces support for Visual Studio Code: Facelets pages (`*.xhtml`), Expression Language and Java
 integration, powered by the [Faces Language Server](https://github.com/jungm/faces-support).
 
+Facelets is the only view declaration language it supports, by design. Pages written in other view declaration
+languages, such as JSP, get no support.
+
 ## Features
 
 - **Facelets language** for `*.xhtml`, highlighted as HTML with EL (`#{…}`, `${…}`) in attribute values, text,
