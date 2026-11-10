@@ -2,6 +2,7 @@ package io.github.jungm.fls.el;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * Recursive-descent EL parser that recovers from errors: incomplete input such as {@code bean.} or
@@ -20,6 +21,11 @@ public final class ElParser {
     private final List<Problem> problems = new ArrayList<>();
     private final int end;
     private int index;
+    /**
+     * True while parsing the consequence of a ternary outside any brackets, where {@code a:b} is the ternary's
+     * {@code ? a : b} and not a half-typed function {@code prefix:name}.
+     */
+    private boolean awaitingColon;
 
     private ElParser(List<ElToken> tokens, int end) {
         this.tokens = tokens;
@@ -166,7 +172,10 @@ public final class ElParser {
             return condition;
         }
         next();
+        boolean outer = awaitingColon;
+        awaitingColon = true;
         ElNode consequence = assignment();
+        awaitingColon = outer;
         expect(":");
         ElNode alternative = assignment();
         return new ElNode.Ternary(condition, consequence, alternative, condition.start(), lastEnd());
@@ -228,7 +237,7 @@ public final class ElParser {
                 }
             } else if (peek().is("[")) {
                 next();
-                ElNode indexNode = peek().is("]") ? missing() : sequence();
+                ElNode indexNode = bracketed(() -> peek().is("]") ? missing() : sequence());
                 expect("]");
                 node = new ElNode.Index(node, indexNode, node.start(), lastEnd());
             } else if (peek().is("(")) {
@@ -240,7 +249,22 @@ public final class ElParser {
         }
     }
 
+    /** Parses inside brackets, where a colon cannot belong to an enclosing ternary. */
+    private <T> T bracketed(Supplier<T> parser) {
+        boolean outer = awaitingColon;
+        awaitingColon = false;
+        try {
+            return parser.get();
+        } finally {
+            awaitingColon = outer;
+        }
+    }
+
     private List<ElNode> arguments() {
+        return bracketed(this::argumentList);
+    }
+
+    private List<ElNode> argumentList() {
         expect("(");
         List<ElNode> arguments = new ArrayList<>();
         if (accept(")")) {
@@ -261,7 +285,12 @@ public final class ElParser {
         switch (token.kind()) {
             case IDENTIFIER -> {
                 next();
-                if (peek().is(":") && peek(1).kind() == ElToken.Kind.IDENTIFIER && peek(2).is("(")
+                // a function name may be a keyword ("fn:empty", "fn:le" while "fn:length" is typed); in a ternary's
+                // consequence only an identifier is, so that "a ? b:empty(x)" keeps its alternative
+                ElToken.Kind nameKind = peek(1).kind();
+                boolean functionName = nameKind == ElToken.Kind.IDENTIFIER
+                        || nameKind == ElToken.Kind.KEYWORD && !awaitingColon;
+                if (peek().is(":") && functionName && peek(2).is("(")
                         && peek().start() == token.end()) {
                     next();
                     ElToken name = next();
@@ -269,14 +298,15 @@ public final class ElParser {
                     return new ElNode.Function(token.text(), name.text(), token.start(), name.start(), name.end(),
                             arguments, token.start(), lastEnd());
                 }
-                if (peek().is(":") && peek().start() == token.end() && peek(1).kind() == ElToken.Kind.EOF) {
-                    // "fn:" typed so far: keep the prefix for function completion
+                // "fn:" or "fn:na" typed so far: keep the prefix for function completion. In "a ? b:c" the
+                // colon separates the ternary's branches, as a function needs its "(".
+                if (!awaitingColon && peek().is(":") && peek().start() == token.end() && peek(1).kind() == ElToken.Kind.EOF) {
                     ElToken colon = next();
                     return new ElNode.Function(token.text(), "", token.start(), colon.end(), colon.end(), List.of(),
                             token.start(), colon.end());
                 }
-                if (peek().is(":") && peek().start() == token.end() && peek(1).kind() == ElToken.Kind.IDENTIFIER
-                        && peek(2).kind() == ElToken.Kind.EOF) {
+                if (!awaitingColon && peek().is(":") && peek().start() == token.end()
+                        && functionName && peek(2).kind() == ElToken.Kind.EOF) {
                     next();
                     ElToken name = next();
                     return new ElNode.Function(token.text(), name.text(), token.start(), name.start(), name.end(),
@@ -320,6 +350,15 @@ public final class ElParser {
                 // operators
             }
         }
+        if (token.is("(") || token.is("[") || token.is("{")) {
+            return bracketed(this::bracketLiteral);
+        }
+        return missing();
+    }
+
+    /** A parenthesized expression, list, set or map literal. */
+    private ElNode bracketLiteral() {
+        ElToken token = peek();
         if (token.is("(")) {
             next();
             ElNode inner = sequence();

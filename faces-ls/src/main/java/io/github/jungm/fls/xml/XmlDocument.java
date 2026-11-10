@@ -16,6 +16,11 @@ public final class XmlDocument {
         this.text = text;
     }
 
+    /** Whether the character can be part of a tag or attribute name (prefix and colon included). */
+    public static boolean isNameChar(char c) {
+        return Character.isLetterOrDigit(c) || c == ':' || c == '_' || c == '-' || c == '.';
+    }
+
     public String text() {
         return text;
     }

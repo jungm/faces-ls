@@ -14,6 +14,19 @@ public record ElRegion(int start, int exprStart, int exprEnd, int end, boolean d
         return offset >= exprStart && offset <= exprEnd;
     }
 
+    /** Whether the text contains an EL expression ({@code #{...}} or {@code ${...}}). */
+    public static boolean containsEl(String text) {
+        return text.contains("#{") || text.contains("${");
+    }
+
+    /** The trimmed text when it is a non-blank literal without EL, else null (also for null). */
+    public static String literal(String text) {
+        if (text == null || text.isBlank() || containsEl(text)) {
+            return null;
+        }
+        return text.trim();
+    }
+
     /**
      * Finds EL regions in {@code text[from, to)}. Braces nest (map/set literals) and quoted strings may contain
      * braces. A backslash before {@code $}/{@code #} escapes the expression.

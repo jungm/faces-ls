@@ -3,7 +3,8 @@
 # with jdtls loading the faces-jdt bundle, and prints diagnostics, completion, definitions, hover and semantic tokens.
 #
 # JDTLS: jdtls install directory with bin/jdtls (default: the one installed by Mason; it is copied, not modified).
-# FACES_TEST_JAVA_HOME: JDK 21+ for faces-ls and jdtls (default: the current SDKMAN Java).
+# FACES_TEST_JAVA_HOME: the JDK that runs faces-ls and jdtls; it has to be the version this jdtls needs (25 for current
+# releases, while the build needs 21). Default: the current SDKMAN Java.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

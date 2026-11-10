@@ -1,28 +1,33 @@
 package io.github.jungm.fls.java;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import io.github.jungm.fls.Threads;
+
+import org.eclipse.lsp4j.jsonrpc.Launcher;
+import org.eclipse.lsp4j.jsonrpc.RemoteEndpoint;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -31,26 +36,30 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 /**
- * Connects to the faces-jdt bundle running inside jdtls. The bundle announces itself in
- * {@code $FACES_JDT_RENDEZVOUS/jdtls-<pid>.json}; when several jdtls processes run (several editor windows), the one
- * whose projects contain the workspace root wins. Reconnects in the background when jdtls (re)starts.
+ * Connects to the faces-jdt bundle running inside jdtls: JSON-RPC (lsp4j) over a loopback socket, with the requests
+ * of {@link FacesJdtService} and the notifications of {@link FacesJdtEvents}. The bundle announces itself in
+ * {@code $FACES_JDT_RENDEZVOUS/jdtls-<pid>.json} with its port and a token to authenticate with; when several jdtls
+ * processes run (several editor windows), the one whose projects contain the workspace root wins. Reconnects in the
+ * background when jdtls (re)starts.
  */
 public final class JdtClient implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(JdtClient.class.getName());
+    private static final long DEFAULT_TIMEOUT_MILLIS = 8000;
 
     private final Path rendezvousDir;
     private final List<Path> workspaceRoots;
     private final Consumer<String> eventListener;
     private final Runnable connectionListener;
-    private final AtomicLong ids = new AtomicLong();
-    private final Map<Long, CompletableFuture<JsonElement>> pending = new ConcurrentHashMap<>();
-    private volatile Socket socket;
-    private volatile Writer writer;
-    private volatile long connectedPid = -1;
+    private final ExecutorService threads = Executors.newCachedThreadPool(Threads.daemon("faces-jdt-client"));
+    private volatile Connection connection;
     private volatile boolean matched;
     private long lastLoggedPid = -1;
     private volatile boolean closed;
     private Thread reconnectThread;
+
+    /** An authenticated connection; {@code pending} holds the requests still waiting for an answer. */
+    private record Connection(Socket socket, RemoteEndpoint endpoint, long pid, Set<CompletableFuture<?>> pending) {
+    }
 
     public JdtClient(Path rendezvousDir, List<Path> workspaceRoots, Consumer<String> eventListener, Runnable connectionListener) {
         this.rendezvousDir = rendezvousDir;
@@ -64,21 +73,26 @@ public final class JdtClient implements AutoCloseable {
             LOG.info("FACES_JDT_RENDEZVOUS not set; Java integration disabled");
             return;
         }
-        reconnectThread = new Thread(this::reconnectLoop, "faces-jdt-reconnect");
-        reconnectThread.setDaemon(true);
+        reconnectThread = Threads.daemon("faces-jdt-reconnect").newThread(this::reconnectLoop);
         reconnectThread.start();
     }
 
     public boolean connected() {
-        return socket != null && !socket.isClosed();
+        Connection current = connection;
+        return current != null && open(current.socket());
+    }
+
+    private static boolean open(Socket socket) {
+        return !socket.isClosed() && !socket.isInputShutdown();
     }
 
     private void reconnectLoop() {
         while (!closed) {
             try {
-                if (!connected()) {
+                Connection current = connection;
+                if (current == null || !open(current.socket())) {
                     tryConnect();
-                } else if (!ProcessHandle.of(connectedPid).map(ProcessHandle::isAlive).orElse(false)) {
+                } else if (!ProcessHandle.of(current.pid()).map(ProcessHandle::isAlive).orElse(false)) {
                     disconnect();
                     connectionListener.run();
                 } else if (!matched) {
@@ -87,7 +101,7 @@ public final class JdtClient implements AutoCloseable {
                     Boolean serves = servesWorkspace(10000);
                     if (Boolean.TRUE.equals(serves)) {
                         matched = true;
-                        LOG.info("jdtls pid " + connectedPid + " has imported the workspace");
+                        LOG.info("jdtls pid " + current.pid() + " has imported the workspace");
                         connectionListener.run();
                     } else if (serves != null) {
                         // answered without our projects: another jdtls may have appeared meanwhile
@@ -179,11 +193,11 @@ public final class JdtClient implements AutoCloseable {
     /** Whether the connected jdtls has imported a project of the workspace; null when it did not answer in time. */
     private Boolean servesWorkspace(long timeoutMillis) {
         try {
-            JsonElement ping = request("ping", new JsonObject(), timeoutMillis);
-            if (!ping.isJsonObject()) {
+            Optional<JsonElement> ping = query("ping", new JsonObject(), timeoutMillis);
+            if (ping.isEmpty() || !ping.get().isJsonObject()) {
                 return null;
             }
-            JsonArray projects = ping.getAsJsonObject().getAsJsonArray("projects");
+            JsonArray projects = ping.get().getAsJsonObject().getAsJsonArray("projects");
             for (JsonElement project : projects) {
                 JsonElement location = project.getAsJsonObject().get("location");
                 if (location == null || location.isJsonNull()) {
@@ -202,111 +216,142 @@ public final class JdtClient implements AutoCloseable {
         return false;
     }
 
+    /** Opens a connection and authenticates with the candidate's token. */
     private boolean connect(Candidate candidate) {
+        Socket socket = new Socket();
         try {
-            Socket s = new Socket();
-            s.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), candidate.port()), 2000);
-            Writer w = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8));
+            socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), candidate.port()), 2000);
+            Launcher<FacesJdtService> launcher = new Launcher.Builder<FacesJdtService>()
+                    .setLocalService(new Events())
+                    .setRemoteInterface(FacesJdtService.class)
+                    .setInput(socket.getInputStream())
+                    .setOutput(socket.getOutputStream())
+                    .setExecutorService(threads)
+                    .create();
+            Connection opened = new Connection(socket, launcher.getRemoteEndpoint(), candidate.pid(), ConcurrentHashMap.newKeySet());
+            Future<Void> listening = launcher.startListening();
+            threads.execute(() -> awaitEnd(opened, listening));
             JsonObject hello = new JsonObject();
             hello.addProperty("token", candidate.token());
-            w.write(hello + "\n");
-            w.flush();
-            socket = s;
-            writer = w;
-            connectedPid = candidate.pid();
-            Thread reader = new Thread(() -> readLoop(s), "faces-jdt-reader");
-            reader.setDaemon(true);
-            reader.start();
+            launcher.getRemoteProxy().authenticate(hello).get(2000, TimeUnit.MILLISECONDS);
+            connection = opened;
             return true;
-        } catch (IOException e) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException | ExecutionException | TimeoutException | RuntimeException e) {
             LOG.log(Level.FINE, "cannot connect to jdtls " + candidate.pid(), e);
-            return false;
         }
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+            // not connected
+        }
+        return false;
     }
 
-    private void readLoop(Socket s) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                JsonObject message = JsonParser.parseString(line).getAsJsonObject();
-                if (message.has("event")) {
-                    eventListener.accept(message.get("event").getAsString());
-                    continue;
-                }
-                CompletableFuture<JsonElement> future = pending.remove(message.get("id").getAsLong());
-                if (future == null) {
-                    continue;
-                }
-                if (message.has("error")) {
-                    future.completeExceptionally(new IllegalStateException(message.get("error").getAsString()));
-                } else {
-                    JsonElement result = message.get("result");
-                    future.complete(result == null ? JsonNull.INSTANCE : result);
-                }
-            }
-        } catch (IOException | RuntimeException e) {
-            if (socket == s) {
+    /** Waits until the connection's input ends, then fails its pending requests and reports the disconnect. */
+    private void awaitEnd(Connection ended, Future<Void> listening) {
+        try {
+            listening.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | CancellationException e) {
+            if (connection == ended) {
                 LOG.log(Level.FINE, "faces-jdt connection lost", e);
             }
-        } finally {
-            if (socket == s) {
-                disconnect();
-                LOG.info("disconnected from faces-jdt");
-                connectionListener.run();
+        }
+        boolean current;
+        synchronized (this) {
+            current = connection == ended;
+            if (current) {
+                connection = null;
             }
+        }
+        close(ended);
+        try {
+            ended.socket().close();
+        } catch (IOException ignored) {
+            // closing
+        }
+        if (current) {
+            LOG.info("disconnected from faces-jdt");
+            connectionListener.run();
         }
     }
 
     private synchronized void disconnect() {
-        Socket s = socket;
-        socket = null;
-        writer = null;
-        connectedPid = -1;
-        if (s != null) {
-            try {
-                s.close();
-            } catch (IOException ignored) {
-                // closing
-            }
+        Connection current = connection;
+        connection = null;
+        if (current != null) {
+            close(current);
         }
-        for (CompletableFuture<JsonElement> future : pending.values()) {
+    }
+
+    /**
+     * Ends a connection by shutting its streams down, so the reader sees the end of input instead of a closed socket;
+     * {@link #awaitEnd} closes the socket.
+     */
+    private static void close(Connection closing) {
+        Socket socket = closing.socket();
+        try {
+            if (!socket.isClosed()) {
+                socket.shutdownInput();
+                socket.shutdownOutput();
+            }
+        } catch (IOException ignored) {
+            // already shut down
+        }
+        for (CompletableFuture<?> future : closing.pending()) {
             future.completeExceptionally(new IllegalStateException("disconnected"));
         }
-        pending.clear();
+    }
+
+    /**
+     * Sends a request and waits for its result: the server's answer ({@link JsonNull} when it answered null), or
+     * empty when there is no answer because faces-jdt is not connected, does not answer in time, fails or goes away.
+     */
+    public Optional<JsonElement> query(String method, JsonObject params, long timeoutMillis) {
+        Connection current = connection;
+        if (current == null || !open(current.socket())) {
+            return Optional.empty();
+        }
+        CompletableFuture<Object> future;
+        try {
+            future = current.endpoint().request(method, params);
+        } catch (RuntimeException e) {
+            LOG.log(Level.FINE, method + " could not be sent", e);
+            return Optional.empty();
+        }
+        current.pending().add(future);
+        try {
+            Object result = future.get(timeoutMillis, TimeUnit.MILLISECONDS);
+            return Optional.of(result instanceof JsonElement json ? json : JsonNull.INSTANCE);
+        } catch (TimeoutException e) {
+            // lsp4j sends $/cancelRequest
+            future.cancel(true);
+            LOG.fine(method + " timed out after " + timeoutMillis + " ms");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            future.completeExceptionally(e);
+        } catch (ExecutionException | CancellationException e) {
+            LOG.log(Level.FINE, method + " failed", e);
+        } finally {
+            current.pending().remove(future);
+        }
+        return Optional.empty();
+    }
+
+    public Optional<JsonElement> query(String method, JsonObject params) {
+        return query(method, params, DEFAULT_TIMEOUT_MILLIS);
     }
 
     /** Sends a request and waits for its result. Returns {@link JsonNull} when not connected or on failure. */
     public JsonElement request(String method, JsonObject params, long timeoutMillis) {
-        Writer w = writer;
-        if (w == null) {
-            return JsonNull.INSTANCE;
-        }
-        long id = ids.incrementAndGet();
-        CompletableFuture<JsonElement> future = new CompletableFuture<>();
-        pending.put(id, future);
-        JsonObject request = new JsonObject();
-        request.addProperty("id", id);
-        request.addProperty("method", method);
-        request.add("params", params);
-        try {
-            synchronized (w) {
-                w.write(request + "\n");
-                w.flush();
-            }
-            return future.get(timeoutMillis, TimeUnit.MILLISECONDS);
-        } catch (java.util.concurrent.TimeoutException e) {
-            pending.remove(id);
-            LOG.fine(method + " timed out after " + timeoutMillis + " ms");
-            return JsonNull.INSTANCE;
-        } catch (Exception e) {
-            pending.remove(id);
-            LOG.log(Level.FINE, method + " failed", e);
-            return JsonNull.INSTANCE;
-        }
+        return query(method, params, timeoutMillis).orElse(JsonNull.INSTANCE);
     }
 
     public JsonElement request(String method, JsonObject params) {
-        return request(method, params, 8000);
+        return request(method, params, DEFAULT_TIMEOUT_MILLIS);
     }
 
     @Override
@@ -316,5 +361,15 @@ public final class JdtClient implements AutoCloseable {
             reconnectThread.interrupt();
         }
         disconnect();
+        // without interrupting: the readers end with their input and close their sockets
+        threads.shutdown();
+    }
+
+    /** Receives the notifications of faces-jdt. */
+    private final class Events implements FacesJdtEvents {
+        @Override
+        public void javaChanged() {
+            eventListener.accept("javaChanged");
+        }
     }
 }

@@ -11,25 +11,35 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
+import io.github.jungm.fls.Threads;
+import io.github.jungm.fls.analysis.FaceletsTags;
 import io.github.jungm.fls.analysis.LineIndex;
+import io.github.jungm.fls.el.ElRegion;
 import io.github.jungm.fls.project.LibraryFiles;
+import io.github.jungm.fls.project.LibraryJar;
+import io.github.jungm.fls.project.WebRoots;
+import io.github.jungm.fls.project.WebXml;
 import io.github.jungm.fls.taglib.Namespaces;
 import io.github.jungm.fls.taglib.TagLibrary;
 import io.github.jungm.fls.taglib.TaglibXmlLoader;
@@ -42,12 +52,12 @@ import io.github.jungm.fls.xml.XmlElement;
  * and templates. It answers who uses a file, which pages a file ends up in, and is the basis for client ids
  * across files.
  *
- * <p>The index is built in the background and replaced as a whole ({@link Snapshot}); changes to single files
- * re-parse only that file. Open documents are indexed with their unsaved text.
+ * <p>The index is built in the background as an immutable {@link Snapshot}; a change to a single file re-parses
+ * only that file and relinks only the files whose references it can affect. Files are placed below their web roots
+ * by {@link WebRoots}. Open documents are indexed with their unsaved text.
  */
 public final class FaceletsIndex implements AutoCloseable {
     private static final Logger LOG = Logger.getLogger(FaceletsIndex.class.getName());
-    private static final Set<String> SKIPPED_DIRECTORIES = Set.of("target", "build", "node_modules", "bin", "out");
 
     public enum Kind {
         COMPOSITE, INCLUDE, TEMPLATE
@@ -71,11 +81,7 @@ public final class FaceletsIndex implements AutoCloseable {
 
     private final List<Path> workspaceRoots;
     private final Runnable onUpdate;
-    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread thread = new Thread(r, "faces-ls-index");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(Threads.daemon("faces-ls-index"));
     private final Set<Path> jars = ConcurrentHashMap.newKeySet();
     private final Map<String, Entry> openDocuments = new ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> pendingUpdates = new ConcurrentHashMap<>();
@@ -198,7 +204,7 @@ public final class FaceletsIndex implements AutoCloseable {
         long start = System.nanoTime();
         Map<String, Entry> entries = new LinkedHashMap<>();
         Map<String, Taglib> taglibs = new HashMap<>();
-        Map<Path, String> webXmls = new HashMap<>();
+        Map<Path, WebXml> webXmls = new HashMap<>();
         for (Path root : workspaceRoots) {
             scanDirectory(root, entries, taglibs, webXmls);
         }
@@ -251,16 +257,16 @@ public final class FaceletsIndex implements AutoCloseable {
         }
     }
 
-    private void scanDirectory(Path root, Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, String> webXmls) {
+    private void scanDirectory(Path root, Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, WebXml> webXmls) {
         if (!Files.isDirectory(root)) {
             return;
         }
+        Map<Path, Optional<Path>> webRoots = new HashMap<>();
         try {
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attributes) {
-                    String name = dir.getFileName() == null ? "" : dir.getFileName().toString();
-                    if (!dir.equals(root) && (SKIPPED_DIRECTORIES.contains(name) || name.startsWith("."))) {
+                    if (!dir.equals(root) && WebRoots.isSkipped(dir)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     return FileVisitResult.CONTINUE;
@@ -274,17 +280,17 @@ public final class FaceletsIndex implements AutoCloseable {
                             String uri = file.toUri().toString();
                             if (!openDocuments.containsKey(uri)) {
                                 String text = Files.readString(file, StandardCharsets.UTF_8);
-                                Entry entry = describe(file, uri, text, XmlDocument.parse(text));
-                                if (entry != null) {
-                                    entries.put(uri, entry);
-                                }
+                                Path webRoot = webRoots.computeIfAbsent(file.getParent(),
+                                        dir -> Optional.ofNullable(WebRoots.webRootOf(file))).orElse(null);
+                                entries.put(uri, describe(webRoot, file, uri, text, XmlDocument.parse(text)));
                             }
                         } else if (name.endsWith(".taglib.xml")) {
                             try (InputStream input = Files.newInputStream(file)) {
                                 addTaglib(TaglibXmlLoader.load(input, file.toString()), taglibs);
                             }
                         } else if (name.equals("web.xml") && file.getParent().getFileName().toString().equals("WEB-INF")) {
-                            webXmls.put(file.getParent().getParent(), Files.readString(file, StandardCharsets.UTF_8));
+                            webXmls.put(file.toAbsolutePath().normalize().getParent().getParent(),
+                                    WebXml.parse(Files.readString(file, StandardCharsets.UTF_8)));
                         }
                     } catch (IOException | RuntimeException e) {
                         LOG.log(Level.FINE, "cannot index " + file, e);
@@ -319,156 +325,305 @@ public final class FaceletsIndex implements AutoCloseable {
     }
 
     private void scanJar(Path jar, Map<String, Entry> entries, Map<String, Taglib> taglibs) {
-        try (ZipFile zip = new ZipFile(jar.toFile())) {
-            var enumeration = zip.entries();
-            while (enumeration.hasMoreElements()) {
-                ZipEntry zipEntry = enumeration.nextElement();
-                String name = zipEntry.getName();
-                if (name.startsWith("META-INF/resources/") && name.endsWith(".xhtml")) {
-                    Path extracted = LibraryFiles.extract(jar, name);
-                    if (extracted == null) {
-                        continue;
-                    }
-                    String text = Files.readString(extracted, StandardCharsets.UTF_8);
-                    String webPath = name.substring("META-INF/resources".length());
-                    entries.put(extracted.toUri().toString(), new Entry(extracted.toUri().toString(), text,
-                            XmlDocument.parse(text), new LineIndex(text), webPath, webPath.substring(1), null));
-                } else if (name.startsWith("META-INF/") && name.endsWith(".taglib.xml")) {
-                    try (InputStream input = zip.getInputStream(zipEntry)) {
-                        addTaglib(TaglibXmlLoader.load(input, jar + "!/" + name), taglibs);
-                    }
-                }
+        LibraryJar library = LibraryJar.of(jar);
+        for (String webPath : library.viewPaths()) {
+            Path extracted = LibraryFiles.extract(jar, LibraryJar.META_INF_RESOURCES + webPath.substring(1));
+            if (extracted == null) {
+                continue;
             }
-        } catch (IOException | RuntimeException e) {
-            LOG.log(Level.FINE, "cannot index " + jar, e);
+            try {
+                String text = Files.readString(extracted, StandardCharsets.UTF_8);
+                String uri = extracted.toUri().toString();
+                entries.put(uri, new Entry(uri, text, XmlDocument.parse(text), new LineIndex(text), webPath,
+                        webPath.substring(1), null));
+            } catch (IOException | RuntimeException e) {
+                LOG.log(Level.FINE, "cannot index " + webPath + " in " + jar, e);
+            }
+        }
+        for (TagLibrary taglib : library.taglibs()) {
+            addTaglib(taglib, taglibs);
         }
     }
 
-    /**
-     * Places a file below its web root: {@code src/main/webapp} (composites under {@code resources/}) or
-     * {@code META-INF/resources} of a module (composites directly below).
-     */
+    /** Places a file below its web root ({@link WebRoots}); files outside web roots get no web path. */
     static Entry describe(Path file, String uri, String text, XmlDocument xml) {
         if (file == null) {
             return null;
         }
-        String path = file.toString().replace('\\', '/');
-        String webPath = null;
-        String compositeKey = null;
-        Path webRoot = null;
-        int metaInf = path.lastIndexOf("/META-INF/resources/");
-        int webapp = path.lastIndexOf("/src/main/webapp/");
-        if (metaInf >= 0) {
-            webPath = path.substring(metaInf + "/META-INF/resources".length());
-            compositeKey = webPath.substring(1);
-            webRoot = Path.of(path.substring(0, metaInf + "/META-INF/resources".length()));
-        } else if (webapp >= 0) {
-            webPath = path.substring(webapp + "/src/main/webapp".length());
-            if (webPath.startsWith("/resources/")) {
-                compositeKey = webPath.substring("/resources/".length());
-            }
-            webRoot = Path.of(path.substring(0, webapp + "/src/main/webapp".length()));
-        }
-        return new Entry(uri, text, xml, new LineIndex(text), webPath, compositeKey, webRoot);
+        return describe(WebRoots.webRootOf(file), file, uri, text, xml);
+    }
+
+    private static Entry describe(Path webRoot, Path file, String uri, String text, XmlDocument xml) {
+        WebRoots.Location location = webRoot == null ? null : WebRoots.locate(webRoot, file);
+        return location == null ? new Entry(uri, text, xml, new LineIndex(text), null, null, null)
+                : new Entry(uri, text, xml, new LineIndex(text), location.webPath(), location.compositeKey(), location.webRoot());
     }
 
     // ---------------------------------------------------------------- snapshot
 
-    /** An immutable view of the index. */
+    /**
+     * An immutable view of the index. A snapshot derived for a changed file ({@link #with}, {@link #without})
+     * copies the maps of its predecessor and relinks only the files whose references can resolve differently;
+     * the lists stored in a published snapshot are never modified.
+     */
     public static final class Snapshot {
         private final Map<String, Entry> entries;
         private final Map<String, Taglib> taglibs;
-        private final Map<Path, String> webXmls;
-        private final Map<String, List<String>> byWebPath = new HashMap<>();
-        private final Map<String, List<String>> byCompositeKey = new HashMap<>();
-        private final Map<String, List<Edge>> forward = new HashMap<>();
-        private final Map<String, List<Edge>> reverse = new HashMap<>();
+        private final Map<Path, WebXml> webXmls;
+        private final Map<String, List<String>> byWebPath;
+        private final Map<String, List<String>> byCompositeKey;
+        private final Map<String, List<Edge>> forward;
+        private final Map<String, List<Edge>> reverse;
+        /** Per file, the web paths ({@code p:}) and composite keys ({@code c:}) its references looked up. */
+        private final Map<String, Set<String>> lookups;
         private final long version;
         private final Map<String, Object> cache = new ConcurrentHashMap<>();
+        /** Lists this snapshot created while it is being built, which it may still modify; null once built. */
+        private Set<List<?>> owned = Collections.newSetFromMap(new IdentityHashMap<>());
 
-        private Snapshot(Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, String> webXmls, long version) {
+        private Snapshot(Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, WebXml> webXmls,
+                         Map<String, List<String>> byWebPath, Map<String, List<String>> byCompositeKey,
+                         Map<String, List<Edge>> forward, Map<String, List<Edge>> reverse,
+                         Map<String, Set<String>> lookups, long version) {
             this.entries = entries;
             this.taglibs = taglibs;
             this.webXmls = webXmls;
+            this.byWebPath = byWebPath;
+            this.byCompositeKey = byCompositeKey;
+            this.forward = forward;
+            this.reverse = reverse;
+            this.lookups = lookups;
             this.version = version;
         }
 
-        static Snapshot build(Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, String> webXmls, long version) {
-            Snapshot snapshot = new Snapshot(Map.copyOf(entries), Map.copyOf(taglibs), Map.copyOf(webXmls), version);
-            snapshot.link();
+        static Snapshot build(Map<String, Entry> entries, Map<String, Taglib> taglibs, Map<Path, WebXml> webXmls, long version) {
+            Snapshot snapshot = new Snapshot(new LinkedHashMap<>(entries), Map.copyOf(taglibs), Map.copyOf(webXmls),
+                    new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), version);
+            for (Entry entry : snapshot.entries.values()) {
+                snapshot.addKeys(entry);
+            }
+            for (Entry entry : snapshot.entries.values()) {
+                snapshot.link(entry);
+            }
+            snapshot.owned = null;
             return snapshot;
         }
 
-        Snapshot with(Entry entry, long version) {
-            Map<String, Entry> copy = new LinkedHashMap<>(entries);
-            copy.put(entry.uri(), entry);
-            return build(copy, taglibs, webXmls, version);
+        /** A copy sharing this snapshot's lists until it modifies them. */
+        private Snapshot derive(long version) {
+            return new Snapshot(new LinkedHashMap<>(entries), taglibs, webXmls, new HashMap<>(byWebPath),
+                    new HashMap<>(byCompositeKey), new HashMap<>(forward), new HashMap<>(reverse), new HashMap<>(lookups),
+                    version);
         }
 
+        /**
+         * This snapshot with {@code entry} added or replaced. When the file keeps its web root, web path and
+         * composite key only its own edges change; otherwise the files that looked up its old or new keys are
+         * relinked as well.
+         */
+        Snapshot with(Entry entry, long version) {
+            Snapshot next = derive(version);
+            Entry previous = next.entries.put(entry.uri(), entry);
+            Set<String> relink = new LinkedHashSet<>();
+            if (previous == null || !sameKeys(previous, entry)) {
+                if (previous != null) {
+                    next.removeKeys(previous);
+                }
+                next.addKeys(entry);
+                Set<String> changed = keysOf(previous);
+                changed.addAll(keysOf(entry));
+                relink.addAll(next.lookingUp(changed));
+            }
+            relink.add(entry.uri());
+            next.relink(relink);
+            next.owned = null;
+            return next;
+        }
+
+        /** This snapshot without the file {@code uri}; the files that looked up its keys are relinked. */
         Snapshot without(String uri, long version) {
-            Map<String, Entry> copy = new LinkedHashMap<>(entries);
-            copy.remove(uri);
-            return build(copy, taglibs, webXmls, version);
+            Snapshot next = derive(version);
+            Entry previous = next.entries.remove(uri);
+            if (previous != null) {
+                next.removeKeys(previous);
+                next.unlink(uri);
+                Set<String> relink = next.lookingUp(keysOf(previous));
+                relink.remove(uri);
+                next.relink(relink);
+            }
+            next.owned = null;
+            return next;
+        }
+
+        private static boolean sameKeys(Entry a, Entry b) {
+            return Objects.equals(a.webPath(), b.webPath()) && Objects.equals(a.compositeKey(), b.compositeKey())
+                    && Objects.equals(a.webRoot(), b.webRoot());
+        }
+
+        private static Set<String> keysOf(Entry entry) {
+            Set<String> keys = new HashSet<>();
+            if (entry != null && entry.webPath() != null) {
+                keys.add("p:" + entry.webPath());
+            }
+            if (entry != null && entry.compositeKey() != null) {
+                keys.add("c:" + entry.compositeKey());
+            }
+            return keys;
+        }
+
+        /** The files whose references looked up one of {@code keys}. */
+        private Set<String> lookingUp(Set<String> keys) {
+            Set<String> result = new LinkedHashSet<>();
+            if (keys.isEmpty()) {
+                return result;
+            }
+            for (Map.Entry<String, Set<String>> file : lookups.entrySet()) {
+                for (String key : keys) {
+                    if (file.getValue().contains(key)) {
+                        result.add(file.getKey());
+                        break;
+                    }
+                }
+            }
+            return result;
+        }
+
+        /** The list stored under {@code key}, copied first unless this snapshot created it. */
+        private <T> List<T> modifiable(Map<String, List<T>> map, String key) {
+            List<T> list = map.get(key);
+            if (list == null || !owned.contains(list)) {
+                list = list == null ? new ArrayList<>() : new ArrayList<>(list);
+                owned.add(list);
+                map.put(key, list);
+            }
+            return list;
+        }
+
+        private <T> void removeFrom(Map<String, List<T>> map, String key, Predicate<T> filter) {
+            if (!map.containsKey(key)) {
+                return;
+            }
+            List<T> list = modifiable(map, key);
+            list.removeIf(filter);
+            if (list.isEmpty()) {
+                map.remove(key);
+            }
+        }
+
+        /** Adds the file to the lookup lists, which are sorted so that ties resolve the same in every snapshot. */
+        private void addKeys(Entry entry) {
+            if (entry.webPath() != null) {
+                insertSorted(modifiable(byWebPath, entry.webPath()), entry.uri());
+            }
+            if (entry.compositeKey() != null) {
+                insertSorted(modifiable(byCompositeKey, entry.compositeKey()), entry.uri());
+            }
+        }
+
+        private static void insertSorted(List<String> list, String uri) {
+            int position = Collections.binarySearch(list, uri);
+            if (position < 0) {
+                list.add(-position - 1, uri);
+            }
+        }
+
+        private void removeKeys(Entry entry) {
+            if (entry.webPath() != null) {
+                removeFrom(byWebPath, entry.webPath(), entry.uri()::equals);
+            }
+            if (entry.compositeKey() != null) {
+                removeFrom(byCompositeKey, entry.compositeKey(), entry.uri()::equals);
+            }
+        }
+
+        private void relink(Set<String> uris) {
+            for (String uri : uris) {
+                unlink(uri);
+            }
+            for (String uri : uris) {
+                Entry entry = entries.get(uri);
+                if (entry != null) {
+                    link(entry);
+                }
+            }
+        }
+
+        private void unlink(String uri) {
+            List<Edge> edges = forward.remove(uri);
+            lookups.remove(uri);
+            if (edges == null) {
+                return;
+            }
+            for (Edge edge : edges) {
+                removeFrom(reverse, edge.to(), e -> e.from().equals(uri));
+            }
+        }
+
+        private void link(Entry entry) {
+            List<Edge> edges = new ArrayList<>();
+            Set<String> keys = new HashSet<>();
+            for (XmlElement element : entry.xml().allElements()) {
+                for (String target : targets(entry, element, keys)) {
+                    edges.add(new Edge(entry.uri(), kindOf(element), element, target));
+                }
+            }
+            forward.put(entry.uri(), edges);
+            lookups.put(entry.uri(), keys);
+            for (Edge edge : edges) {
+                modifiable(reverse, edge.to()).add(edge);
+            }
         }
 
         public long version() {
             return version;
         }
 
-        /** Per-snapshot memo for derived data (client ids), dropped with the snapshot. */
+        /**
+         * Per-snapshot memo for derived data (client ids), dropped with the snapshot. The computation runs outside the
+         * map, so concurrent callers never wait on one another; when two compute the same key, the first result wins.
+         */
         @SuppressWarnings("unchecked")
-        <T> T cached(String key, java.util.function.Supplier<T> compute) {
-            return (T) cache.computeIfAbsent(key, k -> compute.get());
-        }
-
-        private void link() {
-            for (Entry entry : entries.values()) {
-                if (entry.webPath() != null) {
-                    byWebPath.computeIfAbsent(entry.webPath(), k -> new ArrayList<>()).add(entry.uri());
-                }
-                if (entry.compositeKey() != null) {
-                    byCompositeKey.computeIfAbsent(entry.compositeKey(), k -> new ArrayList<>()).add(entry.uri());
+        <T> T cached(String key, Supplier<T> compute) {
+            Object cached = cache.get(key);
+            if (cached == null) {
+                Object computed = compute.get();
+                cached = cache.putIfAbsent(key, computed);
+                if (cached == null) {
+                    cached = computed;
                 }
             }
-            for (Entry entry : entries.values()) {
-                List<Edge> edges = new ArrayList<>();
-                for (XmlElement element : entry.xml().allElements()) {
-                    for (String target : targets(entry, element)) {
-                        edges.add(new Edge(entry.uri(), kindOf(element), element, target));
-                    }
-                }
-                forward.put(entry.uri(), edges);
-                for (Edge edge : edges) {
-                    reverse.computeIfAbsent(edge.to(), k -> new ArrayList<>()).add(edge);
-                }
-            }
+            return (T) cached;
         }
 
         private Kind kindOf(XmlElement element) {
-            if (Namespaces.FACELETS.equals(Namespaces.canonical(element.namespace()))) {
-                return element.localName().equals("include") ? Kind.INCLUDE : Kind.TEMPLATE;
+            if (FaceletsTags.viewAttribute(element) == null) {
+                return Kind.COMPOSITE;
             }
-            return Kind.COMPOSITE;
+            return FaceletsTags.is(element, "include") ? Kind.INCLUDE : Kind.TEMPLATE;
         }
 
-        /** The files an element refers to (several when the same path exists in several modules). */
-        List<String> targets(Entry from, XmlElement element) {
+        /**
+         * The files an element refers to (several when the same path exists in several modules). The web paths and
+         * composite keys it looks up are added to {@code keys}.
+         */
+        List<String> targets(Entry from, XmlElement element, Set<String> keys) {
             String namespace = element.namespace();
             if (namespace == null) {
                 return List.of();
             }
             String canonical = Namespaces.canonical(namespace);
             if (Namespaces.FACELETS.equals(canonical)) {
-                String attribute = switch (element.localName()) {
-                    case "include" -> "src";
-                    case "composition", "decorate" -> "template";
-                    default -> null;
-                };
-                String value = attribute == null ? null : element.attributeValue(attribute);
-                if (value == null || value.isBlank() || value.contains("#{") || value.contains("${")) {
+                String attribute = FaceletsTags.viewAttribute(element);
+                String value = attribute == null ? null : ElRegion.literal(element.attributeValue(attribute));
+                if (value == null) {
                     return List.of();
                 }
-                return resolvePath(from, value.trim());
+                String webPath = WebRoots.resolve(from.webPath(), value);
+                if (webPath == null) {
+                    return List.of();
+                }
+                keys.add("p:" + webPath);
+                return resolveWebPath(webPath, from.webRoot());
             }
             String library = Namespaces.compositeLibrary(canonical);
             if (library == null) {
@@ -478,26 +633,22 @@ public final class FaceletsIndex implements AutoCloseable {
                 }
                 library = taglib.compositeLibrary();
             }
-            return byCompositeKey.getOrDefault(library + "/" + element.localName() + ".xhtml", List.of());
+            String key = library + "/" + element.localName() + ".xhtml";
+            keys.add("c:" + key);
+            return List.copyOf(byCompositeKey.getOrDefault(key, List.of()));
         }
 
-        private List<String> resolvePath(Entry from, String path) {
-            String webPath;
-            if (path.startsWith("/")) {
-                webPath = path;
-            } else if (from.webPath() != null) {
-                webPath = Path.of(from.webPath()).getParent().resolve(path).normalize().toString().replace('\\', '/');
-            } else {
-                return List.of();
-            }
-            List<String> candidates = byWebPath.getOrDefault(webPath, List.of());
-            if (candidates.size() <= 1 || from.webRoot() == null) {
+        /**
+         * The files at a web path in any indexed web root (workspace modules and jars); when there are several, the
+         * one in {@code preferredWebRoot} if it has one.
+         */
+        public List<String> resolveWebPath(String webPath, Path preferredWebRoot) {
+            List<String> candidates = List.copyOf(byWebPath.getOrDefault(webPath, List.of()));
+            if (candidates.size() <= 1 || preferredWebRoot == null) {
                 return candidates;
             }
-            // the same path in several modules: prefer the including file's own web root
             for (String candidate : candidates) {
-                Entry entry = entries.get(candidate);
-                if (from.webRoot().equals(entry.webRoot())) {
+                if (preferredWebRoot.equals(entries.get(candidate).webRoot())) {
                     return List.of(candidate);
                 }
             }
@@ -510,10 +661,8 @@ public final class FaceletsIndex implements AutoCloseable {
          */
         public List<String> resolve(String fromUri, String path) {
             Entry from = entries.get(fromUri);
-            if (from == null) {
-                return path.startsWith("/") ? byWebPath.getOrDefault(path, List.of()) : List.of();
-            }
-            return resolvePath(from, path);
+            String webPath = WebRoots.resolve(from == null ? null : from.webPath(), path);
+            return webPath == null ? List.of() : resolveWebPath(webPath, from == null ? null : from.webRoot());
         }
 
         public Entry entry(String uri) {
@@ -521,15 +670,15 @@ public final class FaceletsIndex implements AutoCloseable {
         }
 
         public Collection<Entry> entries() {
-            return entries.values();
+            return Collections.unmodifiableCollection(entries.values());
         }
 
         public List<Edge> uses(String uri) {
-            return forward.getOrDefault(uri, List.of());
+            return Collections.unmodifiableList(forward.getOrDefault(uri, List.of()));
         }
 
         public List<Edge> usages(String uri) {
-            return reverse.getOrDefault(uri, List.of());
+            return Collections.unmodifiableList(reverse.getOrDefault(uri, List.of()));
         }
 
         public int edgeCount() {
@@ -611,30 +760,8 @@ public final class FaceletsIndex implements AutoCloseable {
 
         /** The client id separator configured in the web.xml of the page's module, ':' by default. */
         public char separatorFor(Entry page) {
-            if (page.webRoot() != null) {
-                String webXml = webXmls.get(page.webRoot());
-                if (webXml != null) {
-                    XmlDocument document = XmlDocument.parse(webXml);
-                    for (XmlElement element : document.allElements()) {
-                        if (!element.localName().equals("context-param")) {
-                            continue;
-                        }
-                        String name = null;
-                        String value = null;
-                        for (XmlElement child : element.children()) {
-                            if (child.localName().equals("param-name")) {
-                                name = child.contentText(webXml).trim();
-                            } else if (child.localName().equals("param-value")) {
-                                value = child.contentText(webXml).trim();
-                            }
-                        }
-                        if (name != null && name.endsWith(".SEPARATOR_CHAR") && value != null && value.length() == 1) {
-                            return value.charAt(0);
-                        }
-                    }
-                }
-            }
-            return ':';
+            WebXml webXml = page.webRoot() == null ? null : webXmls.get(page.webRoot());
+            return webXml == null ? ':' : webXml.separator();
         }
     }
 }

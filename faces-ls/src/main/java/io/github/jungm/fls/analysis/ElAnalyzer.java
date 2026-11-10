@@ -1,6 +1,7 @@
 package io.github.jungm.fls.analysis;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -8,6 +9,7 @@ import java.util.Map;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
 import io.github.jungm.fls.el.ElNode;
 import io.github.jungm.fls.el.ElRegion;
+import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.FacesConfig;
@@ -36,13 +38,13 @@ public final class ElAnalyzer {
     private final FacesDocument document;
     private final String facesPackage;
     private Map<String, ElVariable> documentScope;
-    private final Map<XmlAttribute, ElType> attributeTypes = new java.util.IdentityHashMap<>();
+    private final Map<XmlAttribute, ElType> attributeTypes = new IdentityHashMap<>();
 
-    private io.github.jungm.fls.index.FaceletsIndex.Snapshot index;
+    private FaceletsIndex.Snapshot index;
     private Imports imports = Imports.DEFAULT;
 
     /** The workspace Facelets index, or null when it is not built (yet). */
-    public io.github.jungm.fls.index.FaceletsIndex.Snapshot index() {
+    public FaceletsIndex.Snapshot index() {
         return index;
     }
 
@@ -57,7 +59,7 @@ public final class ElAnalyzer {
         return this;
     }
 
-    public ElAnalyzer withIndex(io.github.jungm.fls.index.FaceletsIndex.Snapshot snapshot) {
+    public ElAnalyzer withIndex(FaceletsIndex.Snapshot snapshot) {
         this.index = snapshot;
         return this;
     }
@@ -273,7 +275,7 @@ public final class ElAnalyzer {
         }
         // templates receive ui:param values from their clients
         for (XmlElement element : document.xml().allElements()) {
-            if (element.localName().equals("insert") && Namespaces.FACELETS.equals(Namespaces.canonical(element.namespace()))) {
+            if (FaceletsTags.is(element, "insert")) {
                 return false;
             }
         }
@@ -287,7 +289,7 @@ public final class ElAnalyzer {
         if (attribute.value() == null) {
             return ElType.UNKNOWN;
         }
-        ElSite site = siteFor(attribute);
+        ElSite site = document.siteOf(attribute);
         if (site == null) {
             return attribute.value().isEmpty() ? ElType.UNKNOWN : ElType.java("java.lang.String");
         }
@@ -302,15 +304,6 @@ public final class ElAnalyzer {
         ElType type = eval(site.parse().root(), scope(site, site.region().exprStart()), null);
         attributeTypes.put(attribute, type);
         return type;
-    }
-
-    private ElSite siteFor(XmlAttribute attribute) {
-        for (ElSite site : document.elSites()) {
-            if (site.attribute() == attribute) {
-                return site;
-            }
-        }
-        return null;
     }
 
     /** The type each iteration variable takes for a collection-valued expression. */
@@ -359,7 +352,7 @@ public final class ElAnalyzer {
 
     /** The static type of every evaluated subexpression of a site, keyed by node identity. */
     public Map<ElNode, ElType> nodeTypes(ElSite site) {
-        Map<ElNode, ElType> types = new java.util.IdentityHashMap<>();
+        Map<ElNode, ElType> types = new IdentityHashMap<>();
         new Evaluator(scope(site, site.region().exprStart()), null, types).eval(site.parse().root());
         return types;
     }
@@ -638,11 +631,7 @@ public final class ElAnalyzer {
                         member.nameEnd(), Severity.WARNING);
                 return ElType.UNKNOWN;
             }
-            JType result = method.returnType();
-            if (result.isVoid() || result.name().equals("java.lang.Object") || result.isTypeVariable()) {
-                return ElType.UNKNOWN;
-            }
-            return ElType.java(result);
+            return returnType(method.returnType());
         }
 
         private ElType function(ElNode.Function function) {
@@ -668,9 +657,7 @@ public final class ElAnalyzer {
                             Severity.WARNING);
                     return ElType.UNKNOWN;
                 }
-                JType result = method.returnType();
-                return result.isVoid() || result.name().equals("java.lang.Object") || result.isTypeVariable()
-                        ? ElType.UNKNOWN : ElType.java(result);
+                return returnType(method.returnType());
             }
             if (namespace == null) {
                 if (problems != null) {
@@ -694,9 +681,16 @@ public final class ElAnalyzer {
                 problem("Function '" + function.prefix() + ":" + function.name() + "' takes " + expected + " argument(s)",
                         function.nameStart(), function.nameEnd(), Severity.WARNING);
             }
-            JType result = JType.parse(definition.returnType());
-            return result.isVoid() || result.name().equals("java.lang.Object") ? ElType.UNKNOWN : ElType.java(result);
+            return returnType(JType.parse(definition.returnType()));
         }
+    }
+
+    /** The type of a call's result; void, Object and type variables say nothing about it. */
+    private static ElType returnType(JType result) {
+        if (result.isVoid() || result.name().equals("java.lang.Object") || result.isTypeVariable()) {
+            return ElType.UNKNOWN;
+        }
+        return ElType.java(result);
     }
 
     /** Picks the overload for an argument count, preferring exact arity over varargs. */

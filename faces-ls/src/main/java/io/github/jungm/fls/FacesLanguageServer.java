@@ -1,8 +1,13 @@
 package io.github.jungm.fls;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -11,9 +16,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 import org.eclipse.lsp4j.CallHierarchyIncomingCall;
 import org.eclipse.lsp4j.CallHierarchyIncomingCallsParams;
@@ -25,10 +32,10 @@ import org.eclipse.lsp4j.CodeAction;
 import org.eclipse.lsp4j.CodeActionKind;
 import org.eclipse.lsp4j.CodeActionOptions;
 import org.eclipse.lsp4j.CodeActionParams;
-import org.eclipse.lsp4j.Command;
 import org.eclipse.lsp4j.CodeLens;
 import org.eclipse.lsp4j.CodeLensOptions;
 import org.eclipse.lsp4j.CodeLensParams;
+import org.eclipse.lsp4j.Command;
 import org.eclipse.lsp4j.CompletionItem;
 import org.eclipse.lsp4j.CompletionList;
 import org.eclipse.lsp4j.CompletionOptions;
@@ -51,23 +58,26 @@ import org.eclipse.lsp4j.InitializeParams;
 import org.eclipse.lsp4j.InitializeResult;
 import org.eclipse.lsp4j.InitializedParams;
 import org.eclipse.lsp4j.Location;
+import org.eclipse.lsp4j.LocationLink;
 import org.eclipse.lsp4j.MessageActionItem;
 import org.eclipse.lsp4j.MessageType;
-import org.eclipse.lsp4j.LocationLink;
 import org.eclipse.lsp4j.PublishDiagnosticsParams;
+import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.ReferenceParams;
+import org.eclipse.lsp4j.Registration;
+import org.eclipse.lsp4j.RegistrationParams;
 import org.eclipse.lsp4j.SemanticTokens;
 import org.eclipse.lsp4j.SemanticTokensParams;
 import org.eclipse.lsp4j.SemanticTokensRangeParams;
 import org.eclipse.lsp4j.SemanticTokensWithRegistrationOptions;
-import org.eclipse.lsp4j.Registration;
-import org.eclipse.lsp4j.RegistrationParams;
 import org.eclipse.lsp4j.ServerCapabilities;
 import org.eclipse.lsp4j.ServerInfo;
 import org.eclipse.lsp4j.ShowDocumentParams;
 import org.eclipse.lsp4j.ShowMessageRequestParams;
 import org.eclipse.lsp4j.TextDocumentSyncKind;
 import org.eclipse.lsp4j.WorkspaceFolder;
+import org.eclipse.lsp4j.jsonrpc.CancelChecker;
+import org.eclipse.lsp4j.jsonrpc.json.MessageJsonHandler;
 import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import org.eclipse.lsp4j.services.LanguageClient;
 import org.eclipse.lsp4j.services.LanguageClientAware;
@@ -88,30 +98,44 @@ import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.java.JdtClient;
 import io.github.jungm.fls.project.ProjectManager;
 import io.github.jungm.fls.project.ProjectModel;
+import io.github.jungm.fls.project.WebRoots;
+import io.github.jungm.fls.taglib.TagLibrary;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 /**
- * The faces-ls language server. All analysis runs on one thread, so the models need no locking.
+ * The faces-ls language server.
+ *
+ * <p>lsp4j delivers notifications in order on its reader thread. Document changes take effect there, so every
+ * request sees the text of all changes the client sent before it; what follows from a change (index update,
+ * diagnostics) runs later. Requests and diagnostics run on a small pool ({@link RequestPool}), so that one request
+ * waiting for jdtls does not hold up the others, and a cancelled request is dropped. Follow-up work of notifications
+ * runs in order on one thread ({@link #worker}).
+ *
+ * <p>Request threads share the documents, the projects and the Facelets index, which are safe for concurrent use:
+ * documents and index snapshots are immutable, and the project models publish new state as a whole and keep their
+ * caches in concurrent maps. Analyzers and providers are created per request. The fields set in
+ * {@link #initialize} are written before any other thread uses them.
  */
 public final class FacesLanguageServer implements LanguageServer, LanguageClientAware, TextDocumentService, WorkspaceService {
     private static final Logger LOG = Logger.getLogger(FacesLanguageServer.class.getName());
 
-    private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread thread = new Thread(r, "faces-ls-worker");
-        thread.setDaemon(true);
-        return thread;
-    });
-    private final Map<String, FacesDocument> documents = new ConcurrentHashMap<>();
-    private final java.util.concurrent.ExecutorService searcher = Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "faces-ls-search");
-        thread.setDaemon(true);
-        return thread;
-    });
     /** lsp4j's own Gson, for LSP types that cross the faces-jdt socket. */
-    private static final com.google.gson.Gson LSP_JSON = new org.eclipse.lsp4j.jsonrpc.json.MessageJsonHandler(Map.of()).getGson();
+    private static final Gson LSP_JSON = new MessageJsonHandler(Map.of()).getGson();
+    private static final int REQUEST_THREADS = 4;
+
+    private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(Threads.daemon("faces-ls-worker"));
+    private final RequestPool requests = new RequestPool(REQUEST_THREADS);
+    private final Map<String, FacesDocument> documents = new ConcurrentHashMap<>();
     private final Map<String, ScheduledFuture<?>> pendingDiagnostics = new ConcurrentHashMap<>();
+    /** Per document, the latest diagnostics run; a run that finishes after a later one started does not publish. */
+    private final Map<String, Long> diagnosticsRuns = new ConcurrentHashMap<>();
+    private final AtomicLong diagnosticsSequence = new AtomicLong();
+    /** Orders publishing diagnostics with closing documents. */
+    private final Object publishLock = new Object();
     private LanguageClient client;
     private JdtClient jdt;
     private ProjectManager projects;
@@ -208,10 +232,10 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         try {
             Path jar = Path.of(FacesLanguageServer.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Path dir = jar.getParent();
-            if (dir != null && java.nio.file.Files.isRegularFile(dir.resolve("faces-jdt.jar"))) {
+            if (dir != null && Files.isRegularFile(dir.resolve("faces-jdt.jar"))) {
                 return dir.resolve("faces-jdt-rendezvous");
             }
-        } catch (java.net.URISyntaxException | RuntimeException e) {
+        } catch (URISyntaxException | RuntimeException e) {
             LOG.log(Level.FINE, "cannot locate faces-ls.jar", e);
         }
         return null;
@@ -230,7 +254,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             LOG.log(Level.FINE, "client does not support file watchers", error);
             return null;
         });
-        worker.schedule(this::offerToStartJdtls, 12, TimeUnit.SECONDS);
+        worker.schedule(() -> requests.execute("jdtls check", this::offerToStartJdtls), 12, TimeUnit.SECONDS);
     }
 
     /**
@@ -244,10 +268,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         }
         Path javaFile = null;
         for (Path root : roots) {
-            try (var files = java.nio.file.Files.walk(root, 12)) {
-                javaFile = files.filter(p -> p.toString().endsWith(".java") && p.toString().contains("/src/main/java/"))
-                        .findFirst().orElse(null);
-            } catch (java.io.IOException | java.io.UncheckedIOException e) {
+            try (Stream<Path> files = Files.walk(root, 12)) {
+                javaFile = files.filter(FacesLanguageServer::isMainJavaSource).findFirst().orElse(null);
+            } catch (IOException | UncheckedIOException e) {
                 LOG.log(Level.FINE, "cannot scan " + root, e);
             }
             if (javaFile != null) {
@@ -272,6 +295,21 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         });
     }
 
+    /** A {@code .java} file below a {@code src/main/java} directory. */
+    static boolean isMainJavaSource(Path file) {
+        Path name = file.getFileName();
+        if (name == null || !name.toString().endsWith(".java")) {
+            return false;
+        }
+        Path sources = Path.of("src", "main", "java");
+        for (Path dir = file.getParent(); dir != null; dir = dir.getParent()) {
+            if (dir.endsWith(sources)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public CompletableFuture<Object> shutdown() {
         if (jdt != null) {
@@ -286,7 +324,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public void exit() {
         worker.shutdownNow();
-        searcher.shutdownNow();
+        requests.close();
         System.exit(0);
     }
 
@@ -317,10 +355,20 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         update(params.getTextDocument().getUri(), text, params.getTextDocument().getVersion());
     }
 
+    /**
+     * Makes the new text current before the next message is read, so that requests sent after the change see it;
+     * the index update and the diagnostics follow on the worker.
+     */
     private void update(String uri, String text, int version) {
+        FacesDocument document;
+        try {
+            document = new FacesDocument(uri, text, version);
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "cannot parse " + uri, e);
+            return;
+        }
+        documents.put(uri, document);
         worker.execute(() -> {
-            FacesDocument document = new FacesDocument(uri, text, version);
-            documents.put(uri, document);
             index.documentChanged(uri, text, document.xml());
             scheduleDiagnostics(uri, 250);
         });
@@ -329,52 +377,67 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public void didClose(DidCloseTextDocumentParams params) {
         String uri = params.getTextDocument().getUri();
-        worker.execute(() -> {
+        ScheduledFuture<?> pending = pendingDiagnostics.remove(uri);
+        if (pending != null) {
+            pending.cancel(false);
+        }
+        synchronized (publishLock) {
             documents.remove(uri);
-            index.documentClosed(uri);
+            diagnosticsRuns.remove(uri);
             client.publishDiagnostics(new PublishDiagnosticsParams(uri, List.of()));
-        });
+        }
+        worker.execute(() -> index.documentClosed(uri));
     }
 
     @Override
     public void didSave(DidSaveTextDocumentParams params) {
-        String uri = params.getTextDocument().getUri();
-        worker.execute(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document != null && document.compositeInterface() != null) {
+        FacesDocument document = documents.get(params.getTextDocument().getUri());
+        if (document == null) {
+            return;
+        }
+        requests.execute("composite update", () -> {
+            if (document.compositeInterface() != null) {
                 projects.forFile(document.path()).taglibs().invalidateComposites();
                 republishAll();
             }
         });
     }
 
-    private ElAnalyzer analyzer(FacesDocument document) {
+    private ElAnalyzer analyzer(FacesDocument document, FacesSettings current) {
         ProjectModel project = projects.forFile(document.path());
         index.addClasspath(project.classpath());
-        return new ElAnalyzer(project, document).withIndex(index.snapshot()).withImports(settings.imports());
+        return new ElAnalyzer(project, document).withIndex(index.snapshot()).withImports(current.imports());
     }
 
     private void scheduleDiagnostics(String uri, long delayMillis) {
-        ScheduledFuture<?> previous = pendingDiagnostics.remove(uri);
-        if (previous != null) {
-            previous.cancel(false);
-        }
-        pendingDiagnostics.put(uri, worker.schedule(() -> publishDiagnostics(uri), delayMillis, TimeUnit.MILLISECONDS));
+        pendingDiagnostics.compute(uri, (key, previous) -> {
+            if (previous != null) {
+                previous.cancel(false);
+            }
+            return worker.schedule(() -> requests.execute("diagnostics of " + uri, () -> publishDiagnostics(uri)),
+                    delayMillis, TimeUnit.MILLISECONDS);
+        });
     }
 
+    /**
+     * Computes and publishes the diagnostics of an open document, unless it changed or closed meanwhile or a later
+     * run started (which publishes instead).
+     */
     private void publishDiagnostics(String uri) {
-        pendingDiagnostics.remove(uri);
+        long run = diagnosticsSequence.incrementAndGet();
+        diagnosticsRuns.put(uri, run);
         FacesDocument document = documents.get(uri);
         if (document == null) {
+            diagnosticsRuns.remove(uri, run);
             return;
         }
-        try {
-            var diagnostics = new DiagnosticsProvider(analyzer(document)).diagnostics();
-            PublishDiagnosticsParams params = new PublishDiagnosticsParams(uri, diagnostics);
-            params.setVersion(document.version());
-            client.publishDiagnostics(params);
-        } catch (RuntimeException e) {
-            LOG.log(Level.WARNING, "diagnostics failed for " + uri, e);
+        PublishDiagnosticsParams params = new PublishDiagnosticsParams(uri,
+                new DiagnosticsProvider(analyzer(document, settings)).diagnostics());
+        params.setVersion(document.version());
+        synchronized (publishLock) {
+            if (documents.get(uri) == document && Long.valueOf(run).equals(diagnosticsRuns.get(uri))) {
+                client.publishDiagnostics(params);
+            }
         }
     }
 
@@ -386,7 +449,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     }
 
     /** Asks the client to request semantic tokens again, once beans, types or taglibs have changed. */
-    private void scheduleSemanticTokensRefresh() {
+    private synchronized void scheduleSemanticTokensRefresh() {
         if (!semanticTokensRefresh || documents.isEmpty()) {
             return;
         }
@@ -425,149 +488,139 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         }
     }
 
-    private <T> CompletableFuture<T> onWorker(Supplier<T> task, T fallback) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return task.get();
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "request failed", e);
+    /** A request on a Facelets document that is open, answered with {@code fallback} for any other document. */
+    private <T> CompletableFuture<T> onDocument(String name, String uri, T fallback,
+                                                DocumentRequest<T> request) {
+        return requests.compute(name, cancel -> {
+            FacesDocument document = documents.get(uri);
+            if (document == null) {
                 return fallback;
             }
-        }, worker);
+            FacesSettings current = settings;
+            ElAnalyzer analyzer = analyzer(document, current);
+            cancel.checkCanceled();
+            return request.answer(document, analyzer, current);
+        }, fallback);
+    }
+
+    @FunctionalInterface
+    private interface DocumentRequest<T> {
+        T answer(FacesDocument document, ElAnalyzer analyzer, FacesSettings settings);
     }
 
     @Override
     public CompletableFuture<Either<List<CompletionItem>, CompletionList>> completion(CompletionParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document == null) {
-                return Either.forRight(new CompletionList(false, List.of()));
-            }
-            int offset = document.lines().offset(params.getPosition());
-            CompletionProvider provider = new CompletionProvider(analyzer(document), settings);
-            List<CompletionItem> items = provider.complete(offset);
-            LOG.fine(() -> "completion at " + params.getPosition().getLine() + ":" + params.getPosition().getCharacter()
-                    + " -> " + items.size() + " items");
-            return Either.forRight(new CompletionList(provider.incomplete(), items));
-        }, Either.forRight(new CompletionList(false, List.of())));
+        return onDocument("completion", params.getTextDocument().getUri(), Either.forRight(new CompletionList(false, List.of())),
+                (document, analyzer, current) -> {
+                    int offset = document.lines().offset(params.getPosition());
+                    CompletionProvider provider = new CompletionProvider(analyzer, current);
+                    List<CompletionItem> items = provider.complete(offset);
+                    LOG.fine(() -> "completion at " + params.getPosition().getLine() + ":"
+                            + params.getPosition().getCharacter() + " -> " + items.size() + " items");
+                    return Either.forRight(new CompletionList(provider.incomplete(), items));
+                });
     }
 
     @Override
     public CompletableFuture<Hover> hover(HoverParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document == null) {
-                return null;
-            }
+        return onDocument("hover", params.getTextDocument().getUri(), null, (document, analyzer, current) -> {
             LOG.fine(() -> "hover at " + params.getPosition().getLine() + ":" + params.getPosition().getCharacter());
-            return new HoverProvider(analyzer(document)).hover(document.lines().offset(params.getPosition()));
-        }, null);
+            return new HoverProvider(analyzer).hover(document.lines().offset(params.getPosition()));
+        });
     }
 
     @Override
     public CompletableFuture<Either<List<? extends Location>, List<? extends LocationLink>>> definition(DefinitionParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document == null) {
-                return Either.forLeft(List.<Location>of());
-            }
-            DefinitionProvider provider = new DefinitionProvider(analyzer(document), other -> {
-                FacesDocument open = documents.get(other);
-                return open == null ? null : open.text();
-            });
-            List<Location> locations = provider.definition(document.lines().offset(params.getPosition()));
-            LOG.fine(() -> "definition at " + params.getPosition().getLine() + ":" + params.getPosition().getCharacter()
-                    + " -> " + locations);
-            return Either.forLeft(locations);
-        }, Either.forLeft(List.<Location>of()));
+        return onDocument("definition", params.getTextDocument().getUri(), Either.forLeft(List.<Location>of()),
+                (document, analyzer, current) -> {
+                    DefinitionProvider provider = new DefinitionProvider(analyzer, other -> {
+                        FacesDocument open = documents.get(other);
+                        return open == null ? null : open.text();
+                    });
+                    List<Location> locations = provider.definition(document.lines().offset(params.getPosition()));
+                    LOG.fine(() -> "definition at " + params.getPosition().getLine() + ":"
+                            + params.getPosition().getCharacter() + " -> " + locations);
+                    return Either.forLeft(locations);
+                });
     }
 
     @Override
     public CompletableFuture<SemanticTokens> semanticTokensFull(SemanticTokensParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            return document == null ? new SemanticTokens(List.of()) : new SemanticTokensProvider(analyzer(document)).full();
-        }, new SemanticTokens(List.of()));
+        return onDocument("semantic tokens", params.getTextDocument().getUri(), new SemanticTokens(List.of()),
+                (document, analyzer, current) -> new SemanticTokensProvider(analyzer).full());
     }
 
     @Override
     public CompletableFuture<SemanticTokens> semanticTokensRange(SemanticTokensRangeParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document == null) {
-                return new SemanticTokens(List.of());
-            }
-            return new SemanticTokensProvider(analyzer(document)).range(document.lines().offset(params.getRange().getStart()),
-                    document.lines().offset(params.getRange().getEnd()));
-        }, new SemanticTokens(List.of()));
+        return onDocument("semantic tokens", params.getTextDocument().getUri(), new SemanticTokens(List.of()),
+                (document, analyzer, current) -> new SemanticTokensProvider(analyzer).range(
+                        document.lines().offset(params.getRange().getStart()),
+                        document.lines().offset(params.getRange().getEnd())));
     }
 
     // ---------------------------------------------------------------- workspace
 
     @Override
     public CompletableFuture<List<Either<Command, CodeAction>>> codeAction(CodeActionParams params) {
-        String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FacesDocument document = documents.get(uri);
-            if (document == null) {
-                return List.<Either<Command, CodeAction>>of();
-            }
+        return onDocument("code actions", params.getTextDocument().getUri(), List.of(), (document, analyzer, current) -> {
             int start = document.lines().offset(params.getRange().getStart());
             int end = document.lines().offset(params.getRange().getEnd());
             List<Either<Command, CodeAction>> result = new ArrayList<>();
-            for (CodeAction action : new CodeActionProvider(analyzer(document), settings)
+            for (CodeAction action : new CodeActionProvider(analyzer, current)
                     .actions(start, end, params.getContext().getDiagnostics(), params.getContext().getOnly())) {
                 result.add(Either.forRight(action));
             }
             return result;
-        }, List.of());
+        });
+    }
+
+    /** A request answered from the Facelets index, with {@code fallback} while it is not built yet. */
+    private <T> CompletableFuture<T> onIndex(String name, T fallback, Function<FaceletsIndex.Snapshot, T> request) {
+        return requests.compute(name, cancel -> {
+            FaceletsIndex.Snapshot snapshot = index.snapshot();
+            return snapshot == null ? fallback : request.apply(snapshot);
+        }, fallback);
+    }
+
+    /** A request that jdtls answers through faces-jdt, with {@code fallback} while it is not connected. */
+    private <T> CompletableFuture<T> onJava(String name, T fallback, Function<CancelChecker, T> request) {
+        if (jdt == null || !jdt.connected()) {
+            return CompletableFuture.completedFuture(fallback);
+        }
+        return requests.compute(name, request, fallback);
     }
 
     @Override
     public CompletableFuture<List<CallHierarchyItem>> prepareCallHierarchy(CallHierarchyPrepareParams params) {
         String uri = params.getTextDocument().getUri();
         if (isJava(uri)) {
-            return onSearcher(() -> javaPrepare(params), List.of());
+            return onJava("call hierarchy", List.of(), cancel -> javaPrepare(params));
         }
-        return onWorker(() -> {
+        return onIndex("call hierarchy", List.of(), snapshot -> {
             FacesDocument document = documents.get(uri);
-            FaceletsIndex.Snapshot snapshot = index.snapshot();
-            if (document == null || snapshot == null) {
-                return List.<CallHierarchyItem>of();
+            if (document == null) {
+                return List.of();
             }
             UsageProvider usages = new UsageProvider(snapshot);
             return List.of(usages.item(usages.targetAt(uri, document.lines().offset(params.getPosition()))));
-        }, List.of());
+        });
     }
 
     @Override
     public CompletableFuture<List<CallHierarchyIncomingCall>> callHierarchyIncomingCalls(CallHierarchyIncomingCallsParams params) {
         if (isJavaItem(params.getItem())) {
-            return onSearcher(() -> javaIncoming(params.getItem()), List.of());
+            return onJava("incoming calls", List.of(), cancel -> javaIncoming(params.getItem(), cancel));
         }
-        return onWorker(() -> {
-            FaceletsIndex.Snapshot snapshot = index.snapshot();
-            return snapshot == null ? List.<CallHierarchyIncomingCall>of()
-                    : new UsageProvider(snapshot).incoming(itemUri(params.getItem()));
-        }, List.of());
+        return onIndex("incoming calls", List.of(), snapshot -> new UsageProvider(snapshot).incoming(itemUri(params.getItem())));
     }
 
     @Override
     public CompletableFuture<List<CallHierarchyOutgoingCall>> callHierarchyOutgoingCalls(CallHierarchyOutgoingCallsParams params) {
         if (isJavaItem(params.getItem())) {
-            return onSearcher(() -> javaCalls(jdt.request("callHierarchy/outgoing", itemParams(params.getItem()), 60000),
-                    CallHierarchyOutgoingCall.class), List.of());
+            return onJava("outgoing calls", List.of(), cancel -> javaCalls(
+                    jdt.request("callHierarchy/outgoing", itemParams(params.getItem()), 60000), CallHierarchyOutgoingCall.class));
         }
-        return onWorker(() -> {
-            FaceletsIndex.Snapshot snapshot = index.snapshot();
-            return snapshot == null ? List.<CallHierarchyOutgoingCall>of()
-                    : new UsageProvider(snapshot).outgoing(itemUri(params.getItem()));
-        }, List.of());
+        return onIndex("outgoing calls", List.of(), snapshot -> new UsageProvider(snapshot).outgoing(itemUri(params.getItem())));
     }
 
     // ---------------------------------------------------------------- call hierarchy of Java members
@@ -576,9 +629,12 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         return uri.endsWith(".java") || uri.startsWith("jdt:");
     }
 
-    /** Items made by faces-jdt carry the Java member in {@code data.member}. */
+    /**
+     * Items made by faces-jdt: Java elements, which carry the Java member in {@code data.member} when faces-jdt found
+     * it. Facelets items carry their URI as a string in {@code data}.
+     */
     private static boolean isJavaItem(CallHierarchyItem item) {
-        return item.getData() instanceof JsonObject data && data.has("member");
+        return isJava(item.getUri()) || item.getData() instanceof JsonObject data && data.has("member");
     }
 
     /** jdtls' items at the position, through faces-jdt. */
@@ -591,30 +647,18 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     }
 
     /** jdtls' callers of a Java member, followed by the Facelets files whose EL uses it. */
-    private List<CallHierarchyIncomingCall> javaIncoming(CallHierarchyItem item) {
+    private List<CallHierarchyIncomingCall> javaIncoming(CallHierarchyItem item, CancelChecker cancel) {
         List<CallHierarchyIncomingCall> calls = new ArrayList<>(
                 javaCalls(jdt.request("callHierarchy/incoming", itemParams(item), 60000), CallHierarchyIncomingCall.class));
-        JsonElement memberJson = ((JsonObject) item.getData()).get("member");
+        cancel.checkCanceled();
+        JsonElement memberJson = item.getData() instanceof JsonObject data ? data.get("member") : null;
         JavaUsages.Member member = memberJson instanceof JsonObject json ? JavaUsages.Member.from(json) : null;
-        FaceletsIndex.Snapshot snapshot = index.snapshot();
-        if (member == null || snapshot == null) {
+        Map<String, List<Range>> usages = member == null ? null : faceletsUsages(member, cancel);
+        if (usages == null) {
             return calls;
         }
-        List<io.github.jungm.fls.taglib.TagLibrary> libraries = new ArrayList<>();
-        for (ProjectModel project : projects.projects()) {
-            libraries.addAll(project.taglibs().projectLibraries());
-        }
-        Map<ProjectModel, Boolean> ready = new java.util.IdentityHashMap<>();
-        Map<String, List<org.eclipse.lsp4j.Range>> usages = new JavaUsages(snapshot, entry -> {
-            Path path = Path.of(URI.create(entry.uri()));
-            ProjectModel project = projects.forFile(path);
-            ready.computeIfAbsent(project, FacesLanguageServer::awaitBeans);
-            FacesDocument open = documents.get(entry.uri());
-            FacesDocument document = open != null ? open : new FacesDocument(entry.uri(), entry.text(), 0);
-            return new ElAnalyzer(project, document).withIndex(snapshot).withImports(settings.imports());
-        }).find(member, libraries);
-        UsageProvider files = new UsageProvider(snapshot);
-        for (Map.Entry<String, List<org.eclipse.lsp4j.Range>> usage : usages.entrySet()) {
+        UsageProvider files = new UsageProvider(index.snapshot());
+        for (Map.Entry<String, List<Range>> usage : usages.entrySet()) {
             CallHierarchyItem from = files.item(usage.getKey());
             from.setRange(usage.getValue().get(0));
             from.setSelectionRange(usage.getValue().get(0));
@@ -623,11 +667,57 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         return calls;
     }
 
+    /**
+     * The Facelets usages of the Java member at a position of a Java file. jdtls answers the Java references itself;
+     * the editor shows the answers of both.
+     */
+    private List<Location> javaReferences(ReferenceParams params, CancelChecker cancel) {
+        JsonObject request = new JsonObject();
+        request.addProperty("uri", params.getTextDocument().getUri());
+        request.addProperty("line", params.getPosition().getLine());
+        request.addProperty("character", params.getPosition().getCharacter());
+        JsonElement memberJson = jdt.request("member", request, 15000);
+        if (!(memberJson instanceof JsonObject json)) {
+            return List.of();
+        }
+        Map<String, List<Range>> usages = faceletsUsages(JavaUsages.Member.from(json), cancel);
+        if (usages == null) {
+            return List.of();
+        }
+        List<Location> locations = new ArrayList<>();
+        usages.forEach((uri, ranges) -> ranges.forEach(range -> locations.add(new Location(uri, range))));
+        return locations;
+    }
+
+    /** The ranges in each Facelets file whose EL uses {@code member}; null while the index is not built. */
+    private Map<String, List<Range>> faceletsUsages(JavaUsages.Member member, CancelChecker cancel) {
+        FaceletsIndex.Snapshot snapshot = index.snapshot();
+        if (snapshot == null) {
+            return null;
+        }
+        List<TagLibrary> libraries = new ArrayList<>();
+        for (ProjectModel project : projects.projects()) {
+            libraries.addAll(project.taglibs().projectLibraries());
+        }
+        Map<ProjectModel, Boolean> ready = new IdentityHashMap<>();
+        FacesSettings current = settings;
+        return new JavaUsages(snapshot, entry -> {
+            cancel.checkCanceled();
+            Path path = Path.of(URI.create(entry.uri()));
+            ProjectModel project = projects.forFile(path);
+            ready.computeIfAbsent(project, p -> awaitBeans(p, cancel));
+            FacesDocument open = documents.get(entry.uri());
+            FacesDocument document = open != null ? open : new FacesDocument(entry.uri(), entry.text(), 0);
+            return new ElAnalyzer(project, document).withIndex(snapshot).withImports(current.imports());
+        }).find(member, libraries);
+    }
+
     /** EL names resolve through beans, which jdtls searches in the background after a change. */
-    private static boolean awaitBeans(ProjectModel project) {
+    private static boolean awaitBeans(ProjectModel project, CancelChecker cancel) {
         project.beans();
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (!project.beansLoaded() && System.nanoTime() < deadline) {
+            cancel.checkCanceled();
             try {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
@@ -646,27 +736,12 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     private static <T> List<T> javaCalls(JsonElement response, Class<T> type) {
         List<T> result = new ArrayList<>();
-        if (response instanceof com.google.gson.JsonArray array) {
+        if (response instanceof JsonArray array) {
             for (JsonElement element : array) {
                 result.add(LSP_JSON.fromJson(element, type));
             }
         }
         return result;
-    }
-
-    /** Workspace searches run apart from the worker, so completion and diagnostics keep going meanwhile. */
-    private <T> CompletableFuture<T> onSearcher(Supplier<T> task, T fallback) {
-        if (jdt == null || !jdt.connected()) {
-            return CompletableFuture.completedFuture(fallback);
-        }
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return task.get();
-            } catch (RuntimeException e) {
-                LOG.log(Level.WARNING, "request failed", e);
-                return fallback;
-            }
-        }, searcher);
     }
 
     private static String itemUri(CallHierarchyItem item) {
@@ -676,25 +751,24 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public CompletableFuture<List<? extends Location>> references(ReferenceParams params) {
         String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
+        if (isJava(uri)) {
+            return onJava("references", List.<Location>of(), cancel -> javaReferences(params, cancel));
+        }
+        return onIndex("references", List.of(), snapshot -> {
             FacesDocument document = documents.get(uri);
-            FaceletsIndex.Snapshot snapshot = index.snapshot();
-            if (document == null || snapshot == null) {
+            if (document == null) {
                 return List.<Location>of();
             }
             UsageProvider usages = new UsageProvider(snapshot);
             String target = usages.targetAt(uri, document.lines().offset(params.getPosition()));
             return usages.references(target, params.getContext() != null && params.getContext().isIncludeDeclaration());
-        }, List.of());
+        });
     }
 
     @Override
     public CompletableFuture<List<? extends CodeLens>> codeLens(CodeLensParams params) {
         String uri = params.getTextDocument().getUri();
-        return onWorker(() -> {
-            FaceletsIndex.Snapshot snapshot = index.snapshot();
-            return snapshot == null ? List.<CodeLens>of() : new UsageProvider(snapshot).codeLenses(uri);
-        }, List.of());
+        return onIndex("code lenses", List.of(), snapshot -> new UsageProvider(snapshot).codeLenses(uri));
     }
 
     @Override
@@ -703,42 +777,58 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         return CompletableFuture.completedFuture(null);
     }
 
-    /** Settings changed: clients send them under {@code "faces"}, under {@code "faces-ls"} or as is. */
+    /**
+     * Settings changed: clients send them under {@code "faces"}, under {@code "faces-ls"} or as is. Diagnostics and
+     * semantic tokens of the open documents follow.
+     */
     @Override
     public void didChangeConfiguration(DidChangeConfigurationParams params) {
         if (params.getSettings() instanceof JsonObject json) {
             JsonElement faces = json.has("faces") ? json.get("faces") : json.has("faces-ls") ? json.get("faces-ls") : json;
             settings = FacesSettings.from(faces);
             LOG.info("settings updated: namespaces " + settings.namespaces().keySet() + ", imports " + settings.imports().tags());
+            republishAll();
         }
     }
 
     @Override
     public void didChangeWatchedFiles(DidChangeWatchedFilesParams params) {
-        worker.execute(() -> {
-            boolean configuration = false;
-            boolean composites = false;
-            for (FileEvent event : params.getChanges()) {
-                String uri = event.getUri();
-                try {
-                    index.fileChanged(Path.of(URI.create(uri)));
-                } catch (RuntimeException e) {
-                    LOG.log(Level.FINE, "cannot index " + uri, e);
-                }
-                if (uri.endsWith("faces-config.xml") || uri.endsWith("web.xml") || uri.endsWith(".taglib.xml")) {
-                    configuration = true;
-                } else if (uri.endsWith(".xhtml") && uri.contains("/resources/")) {
-                    composites = true;
-                }
+        boolean configuration = false;
+        boolean composites = false;
+        for (FileEvent event : params.getChanges()) {
+            String uri = event.getUri();
+            Path file;
+            try {
+                file = Path.of(URI.create(uri));
+            } catch (RuntimeException e) {
+                LOG.log(Level.FINE, "not a file: " + uri, e);
+                continue;
             }
+            worker.execute(() -> index.fileChanged(file));
+            String name = file.getFileName() == null ? "" : file.getFileName().toString();
+            if (name.endsWith("faces-config.xml") || name.endsWith("web.xml") || name.endsWith(".taglib.xml")) {
+                configuration = true;
+            } else if (name.endsWith(".xhtml") && isCompositeComponent(file)) {
+                composites = true;
+            }
+        }
+        boolean reloadConfiguration = configuration;
+        boolean invalidateComposites = composites;
+        requests.execute("configuration reload", () -> {
             for (ProjectModel project : projects.projects()) {
-                if (configuration) {
+                if (reloadConfiguration) {
                     project.reloadConfiguration();
-                } else if (composites) {
+                } else if (invalidateComposites) {
                     project.taglibs().invalidateComposites();
                 }
             }
             republishAll();
         });
+    }
+
+    /** Whether the file is a composite component candidate: below {@code resources/} or {@code META-INF/resources}. */
+    private static boolean isCompositeComponent(Path file) {
+        WebRoots.Location location = WebRoots.locate(file);
+        return location != null && location.compositeKey() != null;
     }
 }

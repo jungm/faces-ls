@@ -5,6 +5,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.project.ProjectModel;
@@ -252,7 +253,7 @@ public final class SearchExpressions {
         };
     }
 
-    private XmlElement closest(XmlElement from, java.util.function.Predicate<XmlElement> test) {
+    private XmlElement closest(XmlElement from, Predicate<XmlElement> test) {
         for (XmlElement current = from.parent(); current != null; current = current.parent()) {
             if (test.test(current)) {
                 return current;

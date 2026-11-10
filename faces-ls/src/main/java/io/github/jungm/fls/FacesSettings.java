@@ -12,7 +12,8 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 /**
- * User settings from {@code lsp.faces-ls.settings}.
+ * User settings: the initialization options of the client, replaced by the settings of each
+ * {@code workspace/didChangeConfiguration}.
  *
  * @param namespaces predefined namespace prefixes: prefix to candidate URIs, first available one wins. Completing a
  *                   tag or function of such a prefix declares it on the root element when the page lacks it.

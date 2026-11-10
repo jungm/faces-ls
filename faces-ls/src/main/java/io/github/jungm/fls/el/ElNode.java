@@ -1,7 +1,10 @@
 package io.github.jungm.fls.el;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.stream.Stream;
 
 /**
  * EL syntax tree. All offsets are absolute document offsets.
@@ -86,7 +89,7 @@ public sealed interface ElNode {
 
     record Ternary(ElNode condition, ElNode consequence, ElNode alternative, int start, int end) implements ElNode {
         public List<ElNode> children() {
-            return java.util.stream.Stream.of(condition, consequence, alternative).filter(java.util.Objects::nonNull).toList();
+            return Stream.of(condition, consequence, alternative).filter(Objects::nonNull).toList();
         }
     }
 
@@ -122,7 +125,7 @@ public sealed interface ElNode {
 
     record MapLiteral(List<ElNode> keys, List<ElNode> values, int start, int end) implements ElNode {
         public List<ElNode> children() {
-            List<ElNode> all = new java.util.ArrayList<>(keys);
+            List<ElNode> all = new ArrayList<>(keys);
             all.addAll(values);
             return all;
         }
@@ -142,7 +145,7 @@ public sealed interface ElNode {
     }
 
     private static List<ElNode> concat(ElNode first, List<ElNode> rest) {
-        List<ElNode> all = new java.util.ArrayList<>();
+        List<ElNode> all = new ArrayList<>();
         all.add(first);
         all.addAll(rest);
         return all;

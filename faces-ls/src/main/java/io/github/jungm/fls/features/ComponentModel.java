@@ -24,6 +24,11 @@ public final class ComponentModel {
         this.project = project;
     }
 
+    /** The project whose tag libraries decide. */
+    public ProjectModel project() {
+        return project;
+    }
+
     /**
      * Tags whose taglib declares a component, composite components, {@code ui:repeat/component/fragment} and
      * passthrough elements ({@code <div jsf:id="...">}). Tag handlers and plain markup are not components.

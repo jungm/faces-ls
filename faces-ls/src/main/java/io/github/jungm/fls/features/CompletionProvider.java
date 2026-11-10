@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -11,20 +12,26 @@ import java.util.regex.Pattern;
 
 import org.eclipse.lsp4j.CompletionItem;
 import org.eclipse.lsp4j.CompletionItemKind;
+import org.eclipse.lsp4j.CompletionItemTag;
+import org.eclipse.lsp4j.InsertReplaceEdit;
 import org.eclipse.lsp4j.InsertTextFormat;
 import org.eclipse.lsp4j.MarkupContent;
 import org.eclipse.lsp4j.MarkupKind;
 import org.eclipse.lsp4j.TextEdit;
+import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import io.github.jungm.fls.FacesSettings;
 import io.github.jungm.fls.analysis.ElAnalyzer;
 import io.github.jungm.fls.analysis.ElType;
 import io.github.jungm.fls.analysis.ElVariable;
+import io.github.jungm.fls.analysis.FaceletsTags;
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
 import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.el.ElNode;
 import io.github.jungm.fls.el.ElParser;
-import io.github.jungm.fls.index.FaceletsIndex;
+import io.github.jungm.fls.el.ElRegion;
+import io.github.jungm.fls.index.ClientIds.ClientId;
+import io.github.jungm.fls.index.ViewPaths;
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
@@ -84,6 +91,18 @@ public final class CompletionProvider {
         return new TextEdit(document.lines().range(start, end), text);
     }
 
+    private Either<TextEdit, InsertReplaceEdit> replacement(int start, int end, String text) {
+        return Either.forLeft(edit(start, end, text));
+    }
+
+    /** An item that replaces {@code [start, end)} with {@code insert}. */
+    private CompletionItem item(String label, CompletionItemKind kind, int start, int end, String insert) {
+        CompletionItem item = new CompletionItem(label);
+        item.setKind(kind);
+        item.setTextEdit(replacement(start, end, insert));
+        return item;
+    }
+
     private static MarkupContent markdown(String text) {
         return text == null || text.isBlank() ? null : new MarkupContent(MarkupKind.MARKDOWN, text);
     }
@@ -133,11 +152,6 @@ public final class CompletionProvider {
 
     private CompletionItem tagItem(String prefix, TagLibrary.TagDef tag, TagLibrary library, int start, int end, TextEdit declaration) {
         String name = prefix + ":" + tag.name();
-        CompletionItem item = new CompletionItem(name);
-        item.setKind(CompletionItemKind.Class);
-        item.setDetail(library.composite() ? "composite component" : library.namespace());
-        item.setDocumentation(markdown(tag.description()));
-        item.setFilterText(name);
         StringBuilder snippet = new StringBuilder(name);
         int index = 1;
         for (TagLibrary.AttributeDef attribute : tag.attributes()) {
@@ -145,10 +159,13 @@ public final class CompletionProvider {
                 snippet.append(' ').append(attribute.name()).append("=\"$").append(index++).append('"');
             }
         }
+        CompletionItem item = item(name, CompletionItemKind.Class, start, end, snippet.toString());
+        item.setDetail(library.composite() ? "composite component" : library.namespace());
+        item.setDocumentation(markdown(tag.description()));
+        item.setFilterText(name);
         if (index > 1) {
             item.setInsertTextFormat(InsertTextFormat.Snippet);
         }
-        item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, end, snippet.toString())));
         if (declaration != null) {
             item.setAdditionalTextEdits(List.of(declaration));
             item.setDetail(library.namespace() + " · adds xmlns:" + prefix);
@@ -163,10 +180,7 @@ public final class CompletionProvider {
         List<CompletionItem> items = new ArrayList<>();
         for (XmlElement open = cursor.element(); open != null; open = open.parent()) {
             if (open.closeTagStart() < 0 && !open.selfClosing() && !open.name().isEmpty()) {
-                CompletionItem item = new CompletionItem(open.name());
-                item.setKind(CompletionItemKind.Class);
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(cursor.replaceStart(), offset, open.name() + ">")));
-                items.add(item);
+                items.add(item(open.name(), CompletionItemKind.Class, cursor.replaceStart(), offset, open.name() + ">"));
                 break;
             }
         }
@@ -190,13 +204,11 @@ public final class CompletionProvider {
                 if (present.contains(attribute.name())) {
                     continue;
                 }
-                CompletionItem item = new CompletionItem(attribute.name());
-                item.setKind(CompletionItemKind.Property);
+                CompletionItem item = item(attribute.name(), CompletionItemKind.Property, cursor.replaceStart(), offset,
+                        attribute.name() + "=\"$1\"");
                 item.setDetail((attribute.required() ? "required " : "") + (attribute.type() != null ? attribute.type() : ""));
                 item.setDocumentation(markdown(attributeDoc(attribute)));
                 item.setInsertTextFormat(InsertTextFormat.Snippet);
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(
-                        edit(cursor.replaceStart(), offset, attribute.name() + "=\"$1\"")));
                 item.setSortText((attribute.required() ? "0" : "1") + attribute.name());
                 items.add(item);
             }
@@ -206,10 +218,8 @@ public final class CompletionProvider {
             for (NamespaceDeclarations.Predefined predefined : namespaces.available(element).values()) {
                 String name = "xmlns:" + predefined.prefix();
                 String text = name + "=\"" + predefined.uri() + "\"";
-                CompletionItem item = new CompletionItem(text);
-                item.setKind(CompletionItemKind.Module);
+                CompletionItem item = item(text, CompletionItemKind.Module, cursor.replaceStart(), offset, text);
                 item.setFilterText(name);
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(cursor.replaceStart(), offset, text)));
                 item.setSortText("2" + name);
                 items.add(item);
             }
@@ -248,7 +258,7 @@ public final class CompletionProvider {
         String local = element.localName();
 
         if (name.equals("xmlns") || name.startsWith("xmlns:")) {
-            Set<String> uris = new java.util.LinkedHashSet<>();
+            Set<String> uris = new LinkedHashSet<>();
             for (TagLibrary library : TaglibRegistry.standardLibraries()) {
                 uris.add(Tags.preferredUri(analyzer.project(), Namespaces.canonical(library.namespace())));
             }
@@ -266,19 +276,8 @@ public final class CompletionProvider {
             return items;
         }
 
-        boolean facelets = Namespaces.FACELETS.equals(namespace);
-        if (facelets && ((local.equals("include") && name.equals("src"))
-                || ((local.equals("composition") || local.equals("decorate")) && name.equals("template")))) {
-            Set<String> paths = new LinkedHashSet<>(analyzer.project().viewPaths());
-            if (analyzer.index() != null) {
-                // META-INF/resources of other modules and jars: served from the classpath of every web app
-                for (FaceletsIndex.Entry entry : analyzer.index().entries()) {
-                    if (entry.webPath() != null && (entry.webRoot() == null || entry.webRoot().endsWith("META-INF/resources"))) {
-                        paths.add(entry.webPath());
-                    }
-                }
-            }
-            for (String path : paths) {
+        if (FaceletsTags.isViewReference(element, name)) {
+            for (String path : ViewPaths.includable(analyzer.project(), analyzer.index(), analyzer.document().uri())) {
                 items.add(valueItem(path, start, offset, CompletionItemKind.File, null));
             }
             return items;
@@ -295,8 +294,7 @@ public final class CompletionProvider {
             return items;
         }
 
-        if (name.equals("type") && (Namespaces.COMPOSITE.equals(namespace) && local.equals("attribute")
-                || analyzer.imports().isTypeAttribute(element, name))) {
+        if (Tags.namesJavaType(analyzer.imports(), element, name)) {
             for (String fqn : analyzer.types().findTypes(prefix, 60)) {
                 items.add(valueItem(fqn, start, offset, CompletionItemKind.Class, null));
             }
@@ -311,11 +309,9 @@ public final class CompletionProvider {
             items.add(valueItem("false", start, offset, CompletionItemKind.Value, null));
         }
         if (prefix.isEmpty()) {
-            CompletionItem el = new CompletionItem("#{…}");
-            el.setKind(CompletionItemKind.Snippet);
+            CompletionItem el = item("#{…}", CompletionItemKind.Snippet, start, offset, "#{$1}");
             el.setInsertTextFormat(InsertTextFormat.Snippet);
             el.setFilterText("#{");
-            el.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, "#{$1}")));
             items.add(el);
         }
         return items;
@@ -348,7 +344,7 @@ public final class CompletionProvider {
             int argumentStart = valueStart + expressionStart + open + 1;
             for (XmlElement candidate : document.xml().allElements()) {
                 String value = widgetVar ? candidate.attributeValue("widgetVar") : SearchExpressions.idOf(candidate);
-                if (value != null && !value.isBlank() && !value.contains("#{")) {
+                if (ElRegion.literal(value) != null) {
                     items.add(valueItem(value, argumentStart, offset, CompletionItemKind.Reference, "<" + candidate.name() + ">"));
                 }
             }
@@ -364,14 +360,14 @@ public final class CompletionProvider {
             item.setFilterText(chainPrefix + label);
             if (keyword[0].contains("${")) {
                 item.setInsertTextFormat(InsertTextFormat.Snippet);
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(tokenStart, offset, keyword[0])));
+                item.setTextEdit(replacement(tokenStart, offset, keyword[0]));
             }
             item.setSortText("1" + label);
             items.add(item);
         }
         for (XmlElement candidate : document.xml().allElements()) {
             String id = SearchExpressions.idOf(candidate);
-            if (id != null && !id.isBlank() && !id.contains("#{")) {
+            if (ElRegion.literal(id) != null) {
                 CompletionItem item = valueItem(id, tokenStart, offset, CompletionItemKind.Reference, "<" + candidate.name() + ">");
                 item.setFilterText(chainPrefix + id);
                 item.setSortText("0" + id);
@@ -381,18 +377,18 @@ public final class CompletionProvider {
         // absolute client ids of every page this file ends up in (through templates, includes, composites),
         // filtered by what is typed like the client's fuzzy matching, and capped
         int absoluteStart = valueStart + expressionStart;
-        String typed = expression.toLowerCase(java.util.Locale.ROOT);
+        String typed = expression.toLowerCase(Locale.ROOT);
         int added = 0;
-        for (Map.Entry<String, List<io.github.jungm.fls.index.ClientIds.ClientId>> clientId : ClientIdLookup.all(analyzer).entrySet()) {
-            io.github.jungm.fls.index.ClientIds.ClientId first = clientId.getValue().get(0);
-            if (!isSubsequence(typed, first.absolute().toLowerCase(java.util.Locale.ROOT))) {
+        for (Map.Entry<String, List<ClientId>> clientId : ClientIdLookup.all(analyzer).entrySet()) {
+            ClientId first = clientId.getValue().get(0);
+            if (!isSubsequence(typed, first.absolute().toLowerCase(Locale.ROOT))) {
                 continue;
             }
             if (added++ >= MAX_CLIENT_IDS) {
                 incomplete = true;
                 break;
             }
-            long pages = clientId.getValue().stream().map(io.github.jungm.fls.index.ClientIds.ClientId::pageUri).distinct().count();
+            long pages = clientId.getValue().stream().map(ClientId::pageUri).distinct().count();
             String label = first.absolute();
             String file = first.fileUri().substring(first.fileUri().lastIndexOf('/') + 1);
             CompletionItem item = valueItem(label, absoluteStart, offset, CompletionItemKind.Reference,
@@ -419,10 +415,8 @@ public final class CompletionProvider {
     }
 
     private CompletionItem valueItem(String value, int start, int end, CompletionItemKind kind, String detail) {
-        CompletionItem item = new CompletionItem(value);
-        item.setKind(kind);
+        CompletionItem item = item(value, kind, start, end, value);
         item.setDetail(detail);
-        item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, end, value)));
         return item;
     }
 
@@ -471,6 +465,13 @@ public final class CompletionProvider {
         if (node instanceof ElNode.Function function) {
             return functionItems(site, function.prefix(), function.prefixStart(), wordEnd);
         }
+        ElNode.Identifier functionPrefix = ternaryFunctionPrefix(parse.root(), offset);
+        if (functionPrefix != null) {
+            List<CompletionItem> functions = functionItems(site, functionPrefix.name(), functionPrefix.start(), wordEnd);
+            if (!functions.isEmpty()) {
+                return functions;
+            }
+        }
         int start = node instanceof ElNode.Identifier identifier ? identifier.start() : offset;
         if (node == null && offset > exprStart && Character.isJavaIdentifierPart(text.charAt(offset - 1))) {
             // e.g. a keyword being typed
@@ -480,6 +481,25 @@ public final class CompletionProvider {
             }
         }
         return variableItems(site, scope, start, wordEnd);
+    }
+
+    /**
+     * The parser reads {@code a ? fn:} and {@code a ? fn:na} as ternaries, as EL does once they are complete; while
+     * they are typed, {@code fn} may as well be a function prefix. Returns the identifier before the colon when the
+     * cursor is right after it or in the word that follows it, else null.
+     */
+    private ElNode.Identifier ternaryFunctionPrefix(ElNode root, int offset) {
+        String text = document.text();
+        ElNode.Identifier[] found = new ElNode.Identifier[1];
+        root.walk(node -> {
+            if (node instanceof ElNode.Ternary ternary && ternary.consequence() instanceof ElNode.Identifier prefix
+                    && prefix.end() < offset && text.charAt(prefix.end()) == ':'
+                    && (ternary.alternative() instanceof ElNode.Identifier || ternary.alternative() instanceof ElNode.Missing)
+                    && ternary.alternative().start() == prefix.end() + 1 && ternary.alternative().end() == offset) {
+                found[0] = prefix;
+            }
+        });
+        return found[0];
     }
 
     private static ElNode rightmost(ElNode root, int end) {
@@ -512,17 +532,16 @@ public final class CompletionProvider {
     private List<CompletionItem> variableItems(ElSite site, Map<String, ElVariable> scope, int start, int offset) {
         List<CompletionItem> items = new ArrayList<>();
         for (ElVariable variable : scope.values()) {
-            CompletionItem item = new CompletionItem(variable.name());
-            item.setKind(switch (variable.kind()) {
+            CompletionItemKind kind = switch (variable.kind()) {
                 case BEAN -> CompletionItemKind.Class;
                 case IMPLICIT -> CompletionItemKind.Constant;
                 case BUNDLE -> CompletionItemKind.Module;
                 case CONSTANTS -> CompletionItemKind.Enum;
                 default -> CompletionItemKind.Variable;
-            });
+            };
+            CompletionItem item = item(variable.name(), kind, start, offset, variable.name());
             String type = variable.type().display();
             item.setDetail((type.equals("?") ? "" : type + " · ") + variable.detail());
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, variable.name())));
             item.setSortText(switch (variable.kind()) {
                 case LAMBDA, TAG_VARIABLE, PARAMETER, COMPOSITE -> "0";
                 case BEAN, BUNDLE, CONSTANTS -> "1";
@@ -537,17 +556,7 @@ public final class CompletionProvider {
                 if (library == null) {
                     continue;
                 }
-                for (TagLibrary.FunctionDef function : library.functions().values()) {
-                    String name = declaration.getKey() + ":" + function.name();
-                    CompletionItem item = new CompletionItem(name);
-                    item.setKind(CompletionItemKind.Function);
-                    item.setDetail(function.signature());
-                    item.setDocumentation(markdown(function.description()));
-                    item.setInsertTextFormat(InsertTextFormat.Snippet);
-                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, name + "($1)")));
-                    item.setSortText("3" + name);
-                    items.add(item);
-                }
+                addFunctionItems(items, declaration.getKey(), library, start, offset, null, "");
             }
         }
         for (Imports.Import imported : analyzer.imports().all(analyzer.document().xml())) {
@@ -558,26 +567,12 @@ public final class CompletionProvider {
         if (context != null) {
             for (NamespaceDeclarations.Predefined predefined : namespaces.available(context).values()) {
                 TextEdit declaration = namespaces.declare(predefined.prefix(), predefined.uri());
-                for (TagLibrary.FunctionDef function : predefined.library().functions().values()) {
-                    String name = predefined.prefix() + ":" + function.name();
-                    CompletionItem item = new CompletionItem(name);
-                    item.setKind(CompletionItemKind.Function);
-                    item.setDetail(function.signature() + " · adds xmlns:" + predefined.prefix());
-                    item.setDocumentation(markdown(function.description()));
-                    item.setInsertTextFormat(InsertTextFormat.Snippet);
-                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, name + "($1)")));
-                    if (declaration != null) {
-                        item.setAdditionalTextEdits(List.of(declaration));
-                    }
-                    item.setSortText("3" + name);
-                    items.add(item);
-                }
+                addFunctionItems(items, predefined.prefix(), predefined.library(), start, offset, declaration,
+                        " · adds xmlns:" + predefined.prefix());
             }
         }
         for (String keyword : EL_KEYWORDS) {
-            CompletionItem item = new CompletionItem(keyword);
-            item.setKind(CompletionItemKind.Keyword);
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, keyword)));
+            CompletionItem item = item(keyword, CompletionItemKind.Keyword, start, offset, keyword);
             item.setSortText("4" + keyword);
             items.add(item);
         }
@@ -604,21 +599,37 @@ public final class CompletionProvider {
             }
             return items;
         }
-        // editors that treat "prefix:name" as one word filter by all of it, so the items carry the prefix
+        addFunctionItems(items, prefix, library, start, offset, declaration, "");
+        return items;
+    }
+
+    /**
+     * {@code prefix:name(...)} items for the functions of a tag library. Editors that treat "prefix:name" as one word
+     * filter by all of it, so the items carry the prefix.
+     *
+     * @param declaration  the xmlns declaration the items add, or null
+     * @param detailSuffix appended to each function's signature in the detail
+     */
+    private void addFunctionItems(List<CompletionItem> items, String prefix, TagLibrary library, int start, int end,
+                                  TextEdit declaration, String detailSuffix) {
         for (TagLibrary.FunctionDef function : library.functions().values()) {
-            String name = prefix + ":" + function.name();
-            CompletionItem item = new CompletionItem(name);
-            item.setKind(CompletionItemKind.Function);
-            item.setDetail(function.signature());
+            CompletionItem item = functionItem(prefix, function.name(), function.signature() + detailSuffix, start, end);
             item.setDocumentation(markdown(function.description()));
-            item.setInsertTextFormat(InsertTextFormat.Snippet);
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, name + "($1)")));
             if (declaration != null) {
                 item.setAdditionalTextEdits(List.of(declaration));
             }
             items.add(item);
         }
-        return items;
+    }
+
+    /** A {@code prefix:name(...)} item that leaves the cursor between the parentheses. */
+    private CompletionItem functionItem(String prefix, String function, String detail, int start, int end) {
+        String name = prefix + ":" + function;
+        CompletionItem item = item(name, CompletionItemKind.Function, start, end, name + "($1)");
+        item.setDetail(detail);
+        item.setInsertTextFormat(InsertTextFormat.Snippet);
+        item.setSortText("3" + name);
+        return item;
     }
 
     /** {@code var:method(...)} items for the static methods of an {@code o:importFunctions}, one per name and arity. */
@@ -629,14 +640,8 @@ public final class CompletionProvider {
             if (!seen.add(method.name() + "/" + method.parameters().size())) {
                 continue;
             }
-            String name = imported.var() + ":" + method.name();
-            CompletionItem item = new CompletionItem(name);
-            item.setKind(CompletionItemKind.Function);
-            item.setDetail(method.returnType().display() + " " + method.signature() + " · " + imported.element().name());
-            item.setInsertTextFormat(InsertTextFormat.Snippet);
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, name + "($1)")));
-            item.setSortText("3" + name);
-            items.add(item);
+            items.add(functionItem(imported.var(), method.name(),
+                    method.returnType().display() + " " + method.signature() + " · " + imported.element().name(), start, offset));
         }
         return items;
     }
@@ -646,32 +651,27 @@ public final class CompletionProvider {
         switch (type) {
             case ElType.Java java -> javaMembers(java.type(), start, offset, methodExpression, items);
             case ElType.CompositeComponent component -> {
-                CompletionItem attrs = new CompletionItem("attrs");
-                attrs.setKind(CompletionItemKind.Property);
+                CompletionItem attrs = item("attrs", CompletionItemKind.Property, start, offset, "attrs");
                 attrs.setDetail("composite component attributes");
-                attrs.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, "attrs")));
                 attrs.setSortText("0attrs");
                 items.add(attrs);
                 javaMembers(component.componentType(), start, offset, methodExpression, items);
             }
             case ElType.CompositeAttributes attributes -> {
                 for (TagLibrary.AttributeDef attribute : attributes.contract().attributes()) {
-                    CompletionItem item = new CompletionItem(attribute.name());
-                    item.setKind(CompletionItemKind.Property);
+                    CompletionItem item = item(attribute.name(), CompletionItemKind.Property, start, offset, attribute.name());
                     item.setDetail(attribute.type() != null ? attribute.type() : attribute.methodSignature());
                     item.setDocumentation(markdown(attribute.description()));
-                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, attribute.name())));
                     items.add(item);
                 }
             }
             case ElType.Bundle bundle -> items.addAll(keyItems(bundle, start, offset));
             case ElType.Constants constants -> {
                 for (TypeService.FieldInfo field : analyzer.constants(constants)) {
-                    CompletionItem item = new CompletionItem(field.name());
-                    item.setKind(field.enumConstant() ? CompletionItemKind.EnumMember : CompletionItemKind.Constant);
+                    CompletionItemKind kind = field.enumConstant() ? CompletionItemKind.EnumMember : CompletionItemKind.Constant;
+                    CompletionItem item = item(field.name(), kind, start, offset, field.name());
                     item.setDetail(constants.allValuesKeys().contains(field.name())
                             ? field.type().display() + " · all values" : field.type().display());
-                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, field.name())));
                     items.add(item);
                 }
             }
@@ -703,13 +703,11 @@ public final class CompletionProvider {
             if (property.name().equals("class")) {
                 continue;
             }
-            CompletionItem item = new CompletionItem(property.name());
-            item.setKind(CompletionItemKind.Property);
+            CompletionItem item = item(property.name(), CompletionItemKind.Property, start, offset, property.name());
             item.setDetail(property.type().display() + (property.readable() ? "" : " (write-only)"));
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, property.name())));
             item.setSortText((methodExpression ? "1" : "0") + property.name());
             if (property.getter() != null && property.getter().deprecated()) {
-                item.setTags(List.of(org.eclipse.lsp4j.CompletionItemTag.Deprecated));
+                item.setTags(List.of(CompletionItemTag.Deprecated));
             }
             items.add(item);
         }
@@ -718,10 +716,6 @@ public final class CompletionProvider {
             if (HIDDEN_METHODS.contains(method.name()) || accessorNames.contains(method.name() + "/" + method.parameters().size())) {
                 continue;
             }
-            CompletionItem item = new CompletionItem(method.signature());
-            item.setKind(CompletionItemKind.Method);
-            item.setFilterText(method.name());
-            item.setDetail(method.returnType().display());
             String insert;
             if (methodExpression && !seen.contains(method.name())) {
                 insert = method.name();
@@ -729,14 +723,18 @@ public final class CompletionProvider {
                 insert = method.name() + "()";
             } else {
                 insert = method.name() + "($1)";
-                item.setInsertTextFormat(InsertTextFormat.Snippet);
             }
             seen.add(method.name());
-            item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, insert)));
+            CompletionItem item = item(method.signature(), CompletionItemKind.Method, start, offset, insert);
+            item.setFilterText(method.name());
+            item.setDetail(method.returnType().display());
+            if (insert.endsWith("($1)")) {
+                item.setInsertTextFormat(InsertTextFormat.Snippet);
+            }
             boolean objectMethod = method.declaringType().equals("java.lang.Object");
             item.setSortText((methodExpression ? "0" : objectMethod ? "3" : "2") + method.name());
             if (method.deprecated()) {
-                item.setTags(List.of(org.eclipse.lsp4j.CompletionItemTag.Deprecated));
+                item.setTags(List.of(CompletionItemTag.Deprecated));
             }
             items.add(item);
         }
@@ -748,26 +746,19 @@ public final class CompletionProvider {
             PropertiesFile file = analyzer.project().bundle(bundle.baseName());
             if (file != null) {
                 for (PropertiesFile.Entry entry : file.entries().values()) {
-                    CompletionItem item = new CompletionItem(entry.key());
-                    item.setKind(CompletionItemKind.Text);
+                    CompletionItem item = item(entry.key(), CompletionItemKind.Text, start, offset, entry.key());
                     item.setDetail(entry.value());
-                    item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, entry.key())));
                     items.add(item);
                 }
             }
         } else if (type instanceof ElType.CompositeAttributes attributes) {
             for (TagLibrary.AttributeDef attribute : attributes.contract().attributes()) {
-                CompletionItem item = new CompletionItem(attribute.name());
-                item.setKind(CompletionItemKind.Property);
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, attribute.name())));
-                items.add(item);
+                items.add(item(attribute.name(), CompletionItemKind.Property, start, offset, attribute.name()));
             }
         } else if (type instanceof ElType.Java java && analyzer.types().asSupertype(java.type(), "java.util.Map") == null) {
             for (TypeService.Property property : analyzer.types().members(java.type()).properties().values()) {
-                CompletionItem item = new CompletionItem(property.name());
-                item.setKind(CompletionItemKind.Property);
+                CompletionItem item = item(property.name(), CompletionItemKind.Property, start, offset, property.name());
                 item.setDetail(property.type().display());
-                item.setTextEdit(org.eclipse.lsp4j.jsonrpc.messages.Either.forLeft(edit(start, offset, property.name())));
                 items.add(item);
             }
         }

@@ -140,7 +140,7 @@ public final class SemanticTokensProvider {
             }
         }
         for (XmlAttribute attribute : element.attributes()) {
-            if (attribute.value() == null || attribute.value().contains("#{") || attribute.value().contains("${")) {
+            if (attribute.value() == null || ElRegion.containsEl(attribute.value())) {
                 continue;
             }
             if (attribute.name().equals("widgetVar")

@@ -1,6 +1,8 @@
 package io.github.jungm.fls;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.logging.ConsoleHandler;
@@ -34,8 +36,8 @@ final class Logging {
                         .append(record.getLoggerName().replace("io.github.jungm.fls.", "")).append(": ")
                         .append(formatMessage(record)).append(System.lineSeparator());
                 if (record.getThrown() != null) {
-                    java.io.StringWriter trace = new java.io.StringWriter();
-                    record.getThrown().printStackTrace(new java.io.PrintWriter(trace));
+                    StringWriter trace = new StringWriter();
+                    record.getThrown().printStackTrace(new PrintWriter(trace));
                     text.append(trace);
                 }
                 return text.toString();

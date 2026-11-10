@@ -4,6 +4,7 @@ import {
   CallHierarchyOutgoingCallsRequest,
   CallHierarchyPrepareRequest,
   LanguageClient,
+  ReferencesRequest,
 } from 'vscode-languageclient/node';
 
 const JAVA: vscode.DocumentSelector = [
@@ -18,7 +19,7 @@ interface JavaExtensionApi {
 }
 
 /** Java call hierarchy from faces-ls: jdtls' own hierarchy (through faces-jdt) plus the Facelets files whose EL calls a member. */
-class Provider implements vscode.CallHierarchyProvider {
+class CallHierarchy implements vscode.CallHierarchyProvider {
   constructor(private readonly client: LanguageClient) {}
 
   async prepareCallHierarchy(
@@ -50,15 +51,33 @@ class Provider implements vscode.CallHierarchyProvider {
   }
 }
 
+/** The Facelets files whose EL uses the Java member at a position; VS Code adds them to jdtls' references. */
+class References implements vscode.ReferenceProvider {
+  constructor(private readonly client: LanguageClient) {}
+
+  async provideReferences(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    context: vscode.ReferenceContext,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.Location[] | undefined> {
+    const params = this.client.code2ProtocolConverter.asReferenceParams(document, position, context);
+    const locations = await this.client.sendRequest(ReferencesRequest.type, params, token);
+    return this.client.protocol2CodeConverter.asReferences(locations, token);
+  }
+}
+
 /**
- * Puts faces-ls' Java call hierarchy in place of jdtls'. VS Code asks only one call hierarchy provider per document,
- * the most recently registered among equally specific ones, so the provider is registered while faces-ls reaches
- * faces-jdt (otherwise it could not answer at all), after jdtls is ready, and again whenever jdtls registers its
- * providers anew (switch from syntax to standard mode).
+ * Facelets usages in the Java editor: references, merged by VS Code with jdtls' own, and the call hierarchy, which
+ * faces-ls answers in place of jdtls'. Both are registered while faces-ls reaches faces-jdt, after jdtls is ready.
+ * VS Code asks only one call hierarchy provider per document, the most recently registered among equally specific
+ * ones, so that provider is registered again when a Java editor becomes active, so that it is the newest one even
+ * after jdtls registered its providers anew.
  */
-export class JavaCallHierarchy implements vscode.Disposable {
+export class JavaProviders implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private registration: vscode.Disposable | undefined;
+  private references: vscode.Disposable | undefined;
   private connected = false;
   private generation = 0;
   private watchingModes = false;
@@ -74,6 +93,11 @@ export class JavaCallHierarchy implements vscode.Disposable {
           void this.update();
         }
       }),
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (editor?.document.languageId === 'java' && this.registration) {
+          this.register();
+        }
+      }),
     );
   }
 
@@ -81,6 +105,7 @@ export class JavaCallHierarchy implements vscode.Disposable {
     const generation = ++this.generation;
     this.unregister();
     if (!this.connected) {
+      this.unregisterReferences();
       return;
     }
     const api = await javaApi();
@@ -94,8 +119,14 @@ export class JavaCallHierarchy implements vscode.Disposable {
     if (generation !== this.generation || !this.connected) {
       return;
     }
-    this.registration = vscode.languages.registerCallHierarchyProvider(JAVA, new Provider(this.client));
-    this.log?.info('Java call hierarchy includes Facelets callers');
+    this.register();
+    this.references ??= vscode.languages.registerReferenceProvider(JAVA, new References(this.client));
+    this.log?.info('Java references and call hierarchy include Facelets usages');
+  }
+
+  private register(): void {
+    this.unregister();
+    this.registration = vscode.languages.registerCallHierarchyProvider(JAVA, new CallHierarchy(this.client));
   }
 
   private unregister(): void {
@@ -103,9 +134,15 @@ export class JavaCallHierarchy implements vscode.Disposable {
     this.registration = undefined;
   }
 
+  private unregisterReferences(): void {
+    this.references?.dispose();
+    this.references = undefined;
+  }
+
   dispose(): void {
     this.generation++;
     this.unregister();
+    this.unregisterReferences();
     this.disposables.forEach((d) => d.dispose());
   }
 }

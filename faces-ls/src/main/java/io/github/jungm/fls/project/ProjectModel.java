@@ -4,33 +4,36 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
+import io.github.jungm.fls.Threads;
 import io.github.jungm.fls.java.JdtClient;
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.taglib.TaglibRegistry;
-import io.github.jungm.fls.xml.XmlDocument;
-import io.github.jungm.fls.xml.XmlElement;
 
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 
 /**
  * Everything faces-ls knows about one project: its folders and classpath (from jdtls when connected), web roots,
  * faces-config contents, CDI beans and tag libraries.
+ *
+ * <p>Request threads use a model concurrently. Refreshes and configuration loads run one at a time and publish what
+ * they found through volatile fields; the beans have their own lock, so reading them never waits for jdtls.
  */
 public final class ProjectModel {
     private static final Logger LOG = Logger.getLogger(ProjectModel.class.getName());
-    private static final String META_INF_RESOURCES = "META-INF/resources/";
 
     /** @param library jar or module the bean comes from, or null for the project itself */
     public record Bean(String name, JType type, String scope, String origin, String library,
@@ -42,23 +45,33 @@ public final class ProjectModel {
     private final TypeService types;
     private final TaglibRegistry taglibs = new TaglibRegistry();
     private final Map<Path, CachedProperties> properties = new ConcurrentHashMap<>();
-    private final Map<String, Optional<Path>> bundleFiles = new ConcurrentHashMap<>();
+    /** Bundle files by base name, for the current configuration load (replaced by the next one). */
+    private volatile Map<String, Optional<Path>> bundleFiles = new ConcurrentHashMap<>();
     private volatile List<Path> sourceFolders = List.of();
     private volatile List<Path> classpath = List.of();
     private volatile List<Path> webRoots = List.of();
     private volatile FacesConfig facesConfig = new FacesConfig();
+    private volatile long configurationVersion;
+    /** Guards {@link #beans}, {@link #beansLoading} and {@link #beansGeneration} together. */
+    private final Object beanLock = new Object();
     private volatile List<Bean> beans;
-    private volatile boolean beansLoading;
-    private volatile long beansGeneration;
-    private final Runnable onBeansLoaded;
+    private boolean beansLoading;
+    private long beansGeneration;
+    private volatile boolean discarded;
+    private final Runnable onChanged;
 
-    private static final java.util.concurrent.ExecutorService BEAN_LOADER = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "faces-ls-beans");
-        thread.setDaemon(true);
-        return thread;
-    });
+    /** Bean searches of all projects; several run at once, so a slow search does not hold up other projects. */
+    private static final ScheduledExecutorService BEAN_LOADER =
+            Executors.newScheduledThreadPool(3, Threads.daemon("faces-ls-beans"));
+    /** Delay before a bean search or a refresh that jdtls did not answer is tried again. */
+    private static final long RETRY_SECONDS = 10;
+
     private volatile String facesPackage;
     private volatile boolean javaModelLoaded;
+    private volatile boolean refreshed;
+    /** False when jdtls was connected but did not answer the last refresh; it is then tried again. */
+    private volatile boolean refreshAnswered;
+    private volatile long refreshedAt;
 
     private record CachedProperties(long modified, PropertiesFile file) {
     }
@@ -67,10 +80,14 @@ public final class ProjectModel {
         this(root, client, () -> { });
     }
 
-    public ProjectModel(Path root, JdtClient client, Runnable onBeansLoaded) {
+    /**
+     * @param onChanged runs when background work changed what the project knows: beans loaded, or a refresh that
+     *                  jdtls did not answer the first time
+     */
+    public ProjectModel(Path root, JdtClient client, Runnable onChanged) {
         this.root = root;
         this.client = client;
-        this.onBeansLoaded = onBeansLoaded;
+        this.onChanged = onChanged;
         this.types = new TypeService(client, root.toString());
     }
 
@@ -107,20 +124,62 @@ public final class ProjectModel {
         return javaModelLoaded;
     }
 
+    /**
+     * Refreshes the project on first use, and again when jdtls did not answer the last refresh (at most every few
+     * seconds), so that a timeout does not leave the project without its classpath. Concurrent callers wait for the
+     * refresh in progress.
+     */
+    public void ensureRefreshed() {
+        if (upToDate()) {
+            return;
+        }
+        synchronized (this) {
+            if (upToDate()) {
+                return;
+            }
+            if (!refreshed) {
+                refresh();
+                return;
+            }
+            Optional<JsonElement> answer = askProject();
+            if (answer.isEmpty()) {
+                refreshedAt = System.nanoTime();
+                return;
+            }
+            load(answer);
+        }
+        onChanged.run();
+    }
+
+    private boolean upToDate() {
+        return refreshed && (refreshAnswered || System.nanoTime() - refreshedAt < TimeUnit.SECONDS.toNanos(RETRY_SECONDS));
+    }
+
     public synchronized void refresh() {
+        load(askProject());
+    }
+
+    /** jdtls' description of the project: JSON null when not connected, empty when jdtls gave no answer. */
+    private Optional<JsonElement> askProject() {
+        if (client == null || !client.connected()) {
+            return Optional.of(JsonNull.INSTANCE);
+        }
+        JsonObject params = new JsonObject();
+        params.addProperty("path", root.toString());
+        return client.query("project", params, 15000);
+    }
+
+    /** Takes folders and classpath from jdtls' answer, or from the conventional layout, and reloads everything. */
+    private void load(Optional<JsonElement> answer) {
         List<Path> sources = new ArrayList<>();
         List<Path> jars = new ArrayList<>();
         boolean loaded = false;
-        if (client != null && client.connected()) {
-            JsonObject params = new JsonObject();
-            params.addProperty("path", root.toString());
-            JsonElement response = client.request("project", params, 15000);
-            if (response.isJsonObject()) {
-                JsonObject project = response.getAsJsonObject();
-                project.getAsJsonArray("sourceFolders").forEach(e -> sources.add(Path.of(e.getAsString())));
-                project.getAsJsonArray("classpath").forEach(e -> jars.add(Path.of(e.getAsString())));
-                loaded = true;
-            }
+        boolean answered = answer.isPresent();
+        if (answered && answer.get().isJsonObject()) {
+            JsonObject project = answer.get().getAsJsonObject();
+            project.getAsJsonArray("sourceFolders").forEach(e -> sources.add(Path.of(e.getAsString())));
+            project.getAsJsonArray("classpath").forEach(e -> jars.add(Path.of(e.getAsString())));
+            loaded = true;
         }
         if (sources.isEmpty()) {
             for (String candidate : List.of("src/main/java", "src/main/resources", "src")) {
@@ -135,12 +194,14 @@ public final class ProjectModel {
         webRoots = findWebRoots();
         javaModelLoaded = loaded;
         types.invalidate();
-        beans = null;
-        beansGeneration++;
         facesPackage = null;
         reloadConfiguration();
+        refreshAnswered = answered;
+        refreshedAt = System.nanoTime();
+        refreshed = true;
         LOG.info("project " + root + ": " + sourceFolders.size() + " source folders, " + classpath.size()
-                + " classpath entries, web roots " + webRoots + (loaded ? "" : " (without jdtls)"));
+                + " classpath entries, web roots " + webRoots
+                + (loaded ? "" : answered ? " (without jdtls)" : " (jdtls did not answer)"));
     }
 
     /** Sets the classpath directly, for callers that know it without jdtls, and reloads the configuration. */
@@ -167,7 +228,7 @@ public final class ProjectModel {
                     LOG.log(Level.FINE, "cannot scan " + webInf, e);
                 }
             }
-            taglibFiles.addAll(contextParamLibraries(webRoot));
+            taglibFiles.addAll(WebXml.read(webRoot).faceletsLibraries(webRoot));
             Path resources = webRoot.resolve("resources");
             if (Files.isDirectory(resources)) {
                 resourceRoots.add(new TaglibRegistry.ResourceRoot(resources, null));
@@ -196,7 +257,7 @@ public final class ProjectModel {
         // faces-config.xml shipped in modules and jars: resource bundles and managed beans of libraries
         for (Path entry : classpath) {
             if (LibraryFiles.isJar(entry)) {
-                for (String name : LibraryFiles.entries(entry)) {
+                for (String name : LibraryJar.of(entry).entries()) {
                     if (name.startsWith("META-INF/") && name.indexOf('/', "META-INF/".length()) < 0
                             && name.endsWith("faces-config.xml")) {
                         Path extracted = LibraryFiles.extract(entry, name);
@@ -215,73 +276,28 @@ public final class ProjectModel {
         }
         facesConfig = config;
         taglibs.refresh(classpath, taglibFiles, resourceRoots);
-        bundleFiles.clear();
-        beans = null;
-        beansGeneration++;
+        bundleFiles = new ConcurrentHashMap<>();
+        configurationVersion++;
+        invalidateBeans();
     }
 
-    private List<Path> contextParamLibraries(Path webRoot) {
-        Path webXml = webRoot.resolve("WEB-INF/web.xml");
-        List<Path> result = new ArrayList<>();
-        if (!Files.isRegularFile(webXml)) {
-            return result;
-        }
-        try {
-            String text = Files.readString(webXml);
-            XmlDocument document = XmlDocument.parse(text);
-            for (XmlElement element : document.allElements()) {
-                if (!element.localName().equals("context-param")) {
-                    continue;
-                }
-                String name = null;
-                String value = null;
-                for (XmlElement child : element.children()) {
-                    if (child.localName().equals("param-name")) {
-                        name = child.contentText(text).trim();
-                    } else if (child.localName().equals("param-value")) {
-                        value = child.contentText(text).trim();
-                    }
-                }
-                if (value != null && name != null && name.endsWith(".FACELETS_LIBRARIES")) {
-                    for (String library : value.split(";")) {
-                        String path = library.trim();
-                        if (!path.isEmpty()) {
-                            result.add(webRoot.resolve(path.startsWith("/") ? path.substring(1) : path));
-                        }
-                    }
-                }
-            }
-        } catch (IOException e) {
-            LOG.log(Level.FINE, "cannot read " + webXml, e);
-        }
-        return result;
+    /** Increments with every configuration load, for caches of what the configuration determines. */
+    public long configurationVersion() {
+        return configurationVersion;
     }
 
+    /** The web roots of the project ({@link WebRoots#find}), or the project root when it has none. */
     private List<Path> findWebRoots() {
-        Set<Path> roots = new LinkedHashSet<>();
-        for (String candidate : List.of("src/main/webapp", "WebContent", "web", "webapp", "src/main/resources/META-INF/resources")) {
-            Path dir = root.resolve(candidate);
-            if (Files.isDirectory(dir)) {
-                roots.add(dir);
-            }
-        }
-        if (roots.isEmpty()) {
-            try (Stream<Path> dirs = Files.walk(root, 4)) {
-                dirs.filter(d -> d.getFileName() != null && d.getFileName().toString().equals("WEB-INF") && Files.isDirectory(d))
-                        .filter(d -> !d.toString().contains("/target/") && !d.toString().contains("/build/"))
-                        .forEach(d -> roots.add(d.getParent()));
-            } catch (IOException e) {
-                LOG.log(Level.FINE, "cannot scan " + root, e);
-            }
-        }
-        if (roots.isEmpty()) {
-            roots.add(root);
-        }
-        return List.copyOf(roots);
+        List<Path> found = WebRoots.find(root);
+        return found.isEmpty() ? List.of(root) : found;
     }
 
-    /** The web root containing the file, or the first web root. */
+    /** The web root containing the file ({@link WebRoots#webRootOf}), or else the first web root. */
     public Path webRootFor(Path file) {
+        Path located = WebRoots.webRootOf(file);
+        if (located != null) {
+            return located;
+        }
         for (Path webRoot : webRoots) {
             if (file.startsWith(webRoot)) {
                 return webRoot;
@@ -316,7 +332,7 @@ public final class ProjectModel {
     /**
      * Named beans from jdtls (CDI {@code @Named}, {@code @ManagedBean}) and faces-config managed beans. The jdtls
      * search runs in the background, since it can take seconds while jdtls indexes; until it completes this returns
-     * the faces-config beans only and {@link #beansLoaded()} is false. {@code onBeansLoaded} runs when it completes.
+     * the faces-config beans only and {@link #beansLoaded()} is false. {@code onChanged} runs when it completes.
      */
     public List<Bean> beans() {
         List<Bean> cached = beans;
@@ -326,10 +342,8 @@ public final class ProjectModel {
         if (client == null || !client.connected()) {
             return withManagedBeans(new ArrayList<>());
         }
-        if (!beansLoading) {
-            beansLoading = true;
-            long generation = beansGeneration;
-            BEAN_LOADER.execute(() -> loadBeans(generation));
+        synchronized (beanLock) {
+            startLoadingBeans(0);
         }
         return withManagedBeans(new ArrayList<>());
     }
@@ -339,29 +353,67 @@ public final class ProjectModel {
         return beans != null || client == null || !client.connected();
     }
 
-    private void loadBeans(long generation) {
-        List<Bean> result = new ArrayList<>();
-        JsonObject params = new JsonObject();
-        params.addProperty("path", root.toString());
-        JsonElement response = client.request("beans", params, 60000);
-        if (response.isJsonArray()) {
-            for (JsonElement element : response.getAsJsonArray()) {
-                JsonObject bean = element.getAsJsonObject();
-                result.add(new Bean(bean.get("name").getAsString(), JType.parse(bean.get("type").getAsString()),
-                        bean.has("scope") ? bean.get("scope").getAsString() : null,
-                        "@" + bean.get("kind").getAsString(),
-                        bean.has("library") ? bean.get("library").getAsString() : null,
-                        TypeService.toLocation(bean.get("location"))));
-            }
+    /** Starts a bean search unless one runs or the beans are known; the caller holds {@link #beanLock}. */
+    private void startLoadingBeans(long delaySeconds) {
+        if (beansLoading || beans != null || discarded) {
+            return;
         }
-        synchronized (this) {
+        beansLoading = true;
+        long generation = beansGeneration;
+        BEAN_LOADER.schedule(() -> loadBeans(generation), delaySeconds, TimeUnit.SECONDS);
+    }
+
+    private void invalidateBeans() {
+        synchronized (beanLock) {
+            beans = null;
+            beansGeneration++;
+        }
+    }
+
+    /**
+     * Searches the beans and stores them unless the project changed meanwhile. A search whose answer is outdated
+     * starts again at once, one that got no answer a little later, so that the beans are eventually loaded and
+     * {@code onChanged} runs.
+     */
+    private void loadBeans(long generation) {
+        Optional<JsonElement> response = Optional.empty();
+        List<Bean> result = new ArrayList<>();
+        try {
+            JsonObject params = new JsonObject();
+            params.addProperty("path", root.toString());
+            response = client.query("beans", params, 60000);
+            if (response.isPresent() && response.get().isJsonArray()) {
+                for (JsonElement element : response.get().getAsJsonArray()) {
+                    JsonObject bean = element.getAsJsonObject();
+                    result.add(new Bean(bean.get("name").getAsString(), JType.parse(bean.get("type").getAsString()),
+                            bean.has("scope") ? bean.get("scope").getAsString() : null,
+                            "@" + bean.get("kind").getAsString(),
+                            bean.has("library") ? bean.get("library").getAsString() : null,
+                            TypeService.toLocation(bean.get("location"))));
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "cannot read the beans of " + root, e);
+            response = Optional.empty();
+        }
+        synchronized (beanLock) {
             beansLoading = false;
-            if (generation != beansGeneration || !client.connected() || !response.isJsonArray()) {
+            if (discarded || !client.connected()) {
+                // a new connection replaces the projects
+                return;
+            }
+            if (generation != beansGeneration) {
+                startLoadingBeans(0);
+                return;
+            }
+            if (response.isEmpty()) {
+                LOG.fine(() -> "no answer to the bean search of " + root + ", trying again");
+                startLoadingBeans(RETRY_SECONDS);
                 return;
             }
             beans = List.copyOf(withManagedBeans(result));
         }
-        onBeansLoaded.run();
+        onChanged.run();
     }
 
     private List<Bean> withManagedBeans(List<Bean> result) {
@@ -374,11 +426,16 @@ public final class ProjectModel {
         return result;
     }
 
-    public synchronized void invalidateJava() {
+    public void invalidateJava() {
         types.invalidate();
-        beans = null;
-        beansGeneration++;
+        invalidateBeans();
         facesPackage = null;
+    }
+
+    /** The project is replaced by a new model; it starts no more background work. */
+    public void discard() {
+        discarded = true;
+        invalidateJava();
     }
 
     /**
@@ -386,7 +443,12 @@ public final class ProjectModel {
      * folders, then in class directories and jars of the classpath (extracted for navigation).
      */
     public PropertiesFile bundle(String baseName) {
-        Optional<Path> location = bundleFiles.computeIfAbsent(baseName, this::findBundle);
+        Map<String, Optional<Path>> files = bundleFiles;
+        Optional<Path> location = files.get(baseName);
+        if (location == null) {
+            location = findBundle(baseName);
+            files.putIfAbsent(baseName, location);
+        }
         if (location.isEmpty()) {
             return null;
         }
@@ -400,7 +462,7 @@ public final class ProjectModel {
             }
             return cached.file();
         } catch (IOException e) {
-            bundleFiles.remove(baseName);
+            files.remove(baseName);
             return null;
         }
     }
@@ -420,76 +482,8 @@ public final class ProjectModel {
             }
         }
         for (Path entry : classpath) {
-            if (LibraryFiles.isJar(entry) && LibraryFiles.contains(entry, relative)) {
+            if (LibraryFiles.isJar(entry) && LibraryJar.of(entry).contains(relative)) {
                 return Optional.ofNullable(LibraryFiles.extract(entry, relative));
-            }
-        }
-        return Optional.empty();
-    }
-
-    /**
-     * All Facelets files below the web roots and below {@code META-INF/resources} of the classpath, as paths
-     * relative to their web root (starting with '/').
-     */
-    public List<String> viewPaths() {
-        Set<String> result = new LinkedHashSet<>();
-        for (Path webRoot : webRoots) {
-            collectViews(webRoot, result);
-        }
-        for (Path entry : classpath) {
-            if (LibraryFiles.isJar(entry)) {
-                for (String name : LibraryFiles.entries(entry)) {
-                    if (name.startsWith(META_INF_RESOURCES) && name.endsWith(".xhtml")) {
-                        result.add(name.substring(META_INF_RESOURCES.length() - 1));
-                    }
-                }
-            } else if (Files.isDirectory(entry.resolve(META_INF_RESOURCES))) {
-                collectViews(entry.resolve(META_INF_RESOURCES), result);
-            }
-        }
-        return List.copyOf(result);
-    }
-
-    private static void collectViews(Path webRoot, Set<String> result) {
-        try (Stream<Path> files = Files.walk(webRoot, 12)) {
-            files.filter(p -> p.getFileName().toString().endsWith(".xhtml"))
-                    .forEach(p -> result.add("/" + webRoot.relativize(p).toString().replace('\\', '/')));
-        } catch (IOException e) {
-            LOG.log(Level.FINE, "cannot scan " + webRoot, e);
-        }
-    }
-
-    /**
-     * The file of a view path (e.g. {@code /WEB-INF/layout.xhtml}): below one of the web roots, preferring
-     * {@code preferredWebRoot}, or else below {@code META-INF/resources} of a classpath directory or jar (extracted).
-     */
-    public Optional<Path> findView(String webPath, Path preferredWebRoot) {
-        String relative = webPath.startsWith("/") ? webPath.substring(1) : webPath;
-        if (relative.isEmpty() || relative.endsWith("/")) {
-            return Optional.empty();
-        }
-        List<Path> roots = new ArrayList<>();
-        if (preferredWebRoot != null) {
-            roots.add(preferredWebRoot);
-        }
-        roots.addAll(webRoots);
-        for (Path webRoot : roots) {
-            Path file = webRoot.resolve(relative).normalize();
-            if (file.startsWith(webRoot) && Files.isRegularFile(file)) {
-                return Optional.of(file);
-            }
-        }
-        String entryName = Path.of(META_INF_RESOURCES).resolve(relative).normalize().toString().replace('\\', '/');
-        if (!entryName.startsWith(META_INF_RESOURCES)) {
-            return Optional.empty();
-        }
-        for (Path entry : classpath) {
-            if (LibraryFiles.isJar(entry)) {
-                if (LibraryFiles.contains(entry, entryName)) {
-                    return Optional.ofNullable(LibraryFiles.extract(entry, entryName));
-                }
-            } else if (Files.isRegularFile(entry.resolve(entryName))) {
-                return Optional.of(entry.resolve(entryName));
             }
         }
         return Optional.empty();

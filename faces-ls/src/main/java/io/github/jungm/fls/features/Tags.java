@@ -3,6 +3,7 @@ package io.github.jungm.fls.features;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import io.github.jungm.fls.analysis.Imports;
 import io.github.jungm.fls.project.ProjectModel;
 import io.github.jungm.fls.taglib.Namespaces;
 import io.github.jungm.fls.taglib.TagLibrary;
@@ -28,6 +29,21 @@ final class Tags {
         TagLibrary library = project.taglibs().library(namespace);
         TagLibrary.TagDef tag = library == null ? null : library.tags().get(element.localName());
         return new Resolved(namespace, library, tag);
+    }
+
+    /** Whether the attribute's value is a Java class name: {@code type} of {@code cc:attribute} or of an import tag. */
+    static boolean namesJavaType(Imports imports, XmlElement element, String attributeName) {
+        return attributeName.equals("type")
+                && (Namespaces.COMPOSITE.equals(Namespaces.canonical(element.namespace())) && element.localName().equals("attribute")
+                || imports.isTypeAttribute(element, attributeName));
+    }
+
+    /**
+     * The name of the Java method that implements a taglib function, from its signature such as
+     * {@code int length(java.lang.Object)}; the function's own name may differ.
+     */
+    static String javaMethodName(TagLibrary.FunctionDef function) {
+        return function.signature().replaceFirst("\\s*\\(.*", "").replaceFirst(".*\\s", "");
     }
 
     /** Namespace prefixes declared on the element and its ancestors, innermost first. */

@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import io.github.jungm.fls.el.ElRegion;
 import io.github.jungm.fls.taglib.Namespaces;
 import io.github.jungm.fls.xml.XmlAttribute;
 import io.github.jungm.fls.xml.XmlDocument;
@@ -124,7 +125,7 @@ public final class Imports {
     public Import of(XmlElement element) {
         Kind kind = kind(element);
         XmlAttribute typeAttribute = element.attribute("type");
-        String type = literal(typeAttribute == null ? null : typeAttribute.value());
+        String type = ElRegion.literal(typeAttribute == null ? null : typeAttribute.value());
         if (kind == null || type == null) {
             return null;
         }
@@ -132,7 +133,7 @@ public final class Imports {
         String var;
         XmlAttribute varAttribute = element.attribute("var");
         if (varAttribute != null && varAttribute.value() != null && !varAttribute.value().isBlank()) {
-            var = literal(varAttribute.value());
+            var = ElRegion.literal(varAttribute.value());
             if (var == null) {
                 return null;
             }
@@ -142,7 +143,7 @@ public final class Imports {
         List<String> allValuesKeys = new ArrayList<>();
         if (kind == Kind.ENUM) {
             allValuesKeys.add(ALL_VALUES);
-            String suffix = literal(element.attributeValue("allSuffix"));
+            String suffix = ElRegion.literal(element.attributeValue("allSuffix"));
             if (suffix != null && !suffix.equals(ALL_VALUES)) {
                 allValuesKeys.add(suffix);
             }
@@ -175,12 +176,5 @@ public final class Imports {
     /** Namespaces with import tags, for logging. */
     public Map<String, Map<String, Kind>> tags() {
         return tags;
-    }
-
-    private static String literal(String value) {
-        if (value == null || value.isBlank() || value.contains("#{") || value.contains("${")) {
-            return null;
-        }
-        return value.trim();
     }
 }

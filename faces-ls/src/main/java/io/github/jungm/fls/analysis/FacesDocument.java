@@ -3,7 +3,10 @@ package io.github.jungm.fls.analysis;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import io.github.jungm.fls.el.ElParser;
 import io.github.jungm.fls.el.ElRegion;
@@ -37,8 +40,9 @@ public final class FacesDocument {
     private final XmlDocument xml;
     private final LineIndex lines;
     private final List<ElSite> elSites = new ArrayList<>();
-    private TagLibrary.TagDef compositeInterface;
-    private boolean compositeInterfaceRead;
+    private final Map<XmlAttribute, ElSite> attributeSites = new IdentityHashMap<>();
+    /** Read on first use; empty when the document is no composite component. Reading it twice is harmless. */
+    private volatile Optional<TagLibrary.TagDef> compositeInterface;
 
     public FacesDocument(String uri, String text, int version) {
         this.uri = uri;
@@ -77,6 +81,11 @@ public final class FacesDocument {
             }
         }
         elSites.sort((a, b) -> Integer.compare(a.region().start(), b.region().start()));
+        for (ElSite site : elSites) {
+            if (site.attribute() != null) {
+                attributeSites.putIfAbsent(site.attribute(), site);
+            }
+        }
     }
 
     public String uri() {
@@ -107,6 +116,11 @@ public final class FacesDocument {
         return elSites;
     }
 
+    /** The first EL expression in an attribute's value, or null. */
+    public ElSite siteOf(XmlAttribute attribute) {
+        return attributeSites.get(attribute);
+    }
+
     /** The EL expression whose braces contain the offset. */
     public ElSite elAt(int offset) {
         for (ElSite site : elSites) {
@@ -119,13 +133,15 @@ public final class FacesDocument {
 
     /** The {@code cc:interface} of this document when it is a composite component. */
     public TagLibrary.TagDef compositeInterface() {
-        if (!compositeInterfaceRead) {
-            compositeInterfaceRead = true;
+        Optional<TagLibrary.TagDef> result = compositeInterface;
+        if (result == null) {
+            result = Optional.empty();
             if (CompositeComponents.findInterface(xml) != null || CompositeComponents.findImplementation(xml) != null) {
                 String name = path.getFileName().toString().replaceFirst("\\.xhtml$", "");
-                compositeInterface = CompositeComponents.describe(name, uri, text);
+                result = Optional.ofNullable(CompositeComponents.describe(name, uri, text));
             }
+            compositeInterface = result;
         }
-        return compositeInterface;
+        return result.orElse(null);
     }
 }

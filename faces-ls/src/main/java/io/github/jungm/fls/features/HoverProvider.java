@@ -11,6 +11,8 @@ import io.github.jungm.fls.analysis.ElVariable;
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.analysis.FacesDocument.ElSite;
 import io.github.jungm.fls.analysis.Imports;
+import io.github.jungm.fls.index.ClientIds.ClientId;
+import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
 import io.github.jungm.fls.taglib.TagLibrary;
@@ -94,12 +96,12 @@ public final class HoverProvider {
         String expression = document.text().substring(hit.expression().start(), segment.end());
         if (hit.expression().absolute()) {
             String clientId = ClientIdLookup.clientId(hit.expression(), hit.segment());
-            List<io.github.jungm.fls.index.ClientIds.ClientId> found = clientId == null ? List.of() : ClientIdLookup.find(analyzer, clientId);
+            List<ClientId> found = clientId == null ? List.of() : ClientIdLookup.find(analyzer, clientId);
             if (!found.isEmpty()) {
                 StringBuilder text = new StringBuilder("`").append(expression).append("` → ");
                 for (int i = 0; i < found.size() && i < 5; i++) {
-                    io.github.jungm.fls.index.ClientIds.ClientId target = found.get(i);
-                    io.github.jungm.fls.index.FaceletsIndex.Entry entry = analyzer.index().entry(target.fileUri());
+                    ClientId target = found.get(i);
+                    FaceletsIndex.Entry entry = analyzer.index().entry(target.fileUri());
                     text.append(i == 0 ? "" : ", ").append("`<").append(target.tag()).append(">` in ")
                             .append(entry.webPath() != null ? entry.webPath() : target.fileUri()).append(" (line ")
                             .append(entry.lines().position(target.start()).getLine() + 1).append(')');

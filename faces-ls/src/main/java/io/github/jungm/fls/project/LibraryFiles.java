@@ -2,77 +2,83 @@ package io.github.jungm.fls.project;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Collections;
-import java.util.LinkedHashSet;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.Locale;
 import java.util.Set;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 /**
- * Files inside library jars. Entries are extracted into a read-only cache so that editors can open them (go to
- * definition into a composite component or a bundle shipped in a jar).
+ * Files inside library jars. Entries are extracted into a read-only cache in the user's cache directory so that
+ * editors can open them (go to definition into a composite component or a bundle shipped in a jar).
  */
 public final class LibraryFiles {
     private static final Logger LOG = Logger.getLogger(LibraryFiles.class.getName());
-    private static final Path CACHE = Path.of(System.getProperty("java.io.tmpdir"), "faces-ls-" + System.getProperty("user.name"),
-            "libraries");
+    private static final Set<PosixFilePermission> OWNER_ONLY = PosixFilePermissions.fromString("rwx------");
+    private static final Path CACHE = cacheRoot(System.getProperty("os.name", ""), System::getenv,
+            System.getProperty("user.home")).resolve("faces-ls").resolve("libraries");
 
     private LibraryFiles() {
     }
 
-    private record Key(Path jar, long modified) {
-    }
-
-    private static final Map<Key, Set<String>> NAMES_BY_VERSION = new ConcurrentHashMap<>();
-
-    /** Names of all entries in a jar, cached per jar version. */
-    public static Set<String> entries(Path jar) {
-        long modified;
-        try {
-            modified = Files.getLastModifiedTime(jar).toMillis();
-        } catch (IOException e) {
-            return Set.of();
+    /**
+     * The per-user cache directory: {@code %LOCALAPPDATA%} on Windows, {@code ~/Library/Caches} on macOS, else
+     * {@code $XDG_CACHE_HOME} or {@code ~/.cache}.
+     */
+    static Path cacheRoot(String osName, UnaryOperator<String> env, String home) {
+        String os = osName.toLowerCase(Locale.ROOT);
+        if (os.startsWith("windows")) {
+            String localAppData = env.apply("LOCALAPPDATA");
+            return localAppData != null && !localAppData.isBlank() ? Path.of(localAppData)
+                    : Path.of(home, "AppData", "Local");
         }
-        return NAMES_BY_VERSION.computeIfAbsent(new Key(jar, modified), key -> {
-            Set<String> names = new LinkedHashSet<>();
-            try (ZipFile zip = new ZipFile(jar.toFile())) {
-                zip.stream().map(ZipEntry::getName).forEach(names::add);
-            } catch (IOException e) {
-                LOG.log(Level.FINE, "cannot open " + jar, e);
-            }
-            return Collections.unmodifiableSet(names);
-        });
+        if (os.startsWith("mac")) {
+            return Path.of(home, "Library", "Caches");
+        }
+        String xdg = env.apply("XDG_CACHE_HOME");
+        if (xdg != null && !xdg.isBlank() && Path.of(xdg).isAbsolute()) {
+            return Path.of(xdg);
+        }
+        return Path.of(home, ".cache");
     }
 
-    public static boolean contains(Path jar, String entry) {
-        return entries(jar).contains(entry);
+    /** The directory extracted entries are cached in. */
+    static Path cacheDirectory() {
+        return CACHE;
     }
 
     /** Extracts an entry (if not yet extracted for this jar version) and returns the extracted file, or null. */
     public static Path extract(Path jar, String entry) {
         try {
-            long modified = Files.getLastModifiedTime(jar).toMillis();
-            String jarKey = jar.getFileName() + "-" + Integer.toHexString((jar.toAbsolutePath() + ":" + modified).hashCode());
+            Path absolute = jar.toAbsolutePath().normalize();
+            long modified = Files.getLastModifiedTime(absolute).toMillis();
+            String jarKey = absolute.getFileName() + "-" + digest(absolute + ":" + modified + ":" + Files.size(absolute));
             Path target = CACHE.resolve(jarKey).resolve(entry).normalize();
-            if (!target.startsWith(CACHE)) {
+            if (!target.startsWith(CACHE.resolve(jarKey))) {
                 return null;
             }
             if (Files.isRegularFile(target)) {
                 return target;
             }
-            try (ZipFile zip = new ZipFile(jar.toFile())) {
+            try (ZipFile zip = new ZipFile(absolute.toFile())) {
                 ZipEntry zipEntry = zip.getEntry(entry);
                 if (zipEntry == null) {
                     return null;
                 }
-                Files.createDirectories(target.getParent());
+                createDirectories(target.getParent());
                 Path temp = Files.createTempFile(target.getParent(), "extract", ".tmp");
                 try (InputStream input = zip.getInputStream(zipEntry)) {
                     Files.copy(input, temp, StandardCopyOption.REPLACE_EXISTING);
@@ -90,9 +96,9 @@ public final class LibraryFiles {
     /** Extracts a resource bundled with faces-ls (such as the standard taglibs) and returns the file, or null. */
     public static Path extractResource(String resource) {
         String version = LibraryFiles.class.getPackage().getImplementationVersion();
-        Path target = CACHE.resolve("faces-ls-" + (version == null ? "dev" : version)).resolve(resource.replaceFirst("^/", ""))
-                .normalize();
-        if (!target.startsWith(CACHE)) {
+        Path base = CACHE.resolve("faces-ls-" + (version == null ? "dev" : version));
+        Path target = base.resolve(resource.replaceFirst("^/", "")).normalize();
+        if (!target.startsWith(base)) {
             return null;
         }
         try (InputStream input = LibraryFiles.class.getResourceAsStream(resource)) {
@@ -103,7 +109,7 @@ public final class LibraryFiles {
             if (Files.isRegularFile(target) && Files.size(target) == content.length) {
                 return target;
             }
-            Files.createDirectories(target.getParent());
+            createDirectories(target.getParent());
             Path temp = Files.createTempFile(target.getParent(), "extract", ".tmp");
             Files.write(temp, content);
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -112,6 +118,55 @@ public final class LibraryFiles {
         } catch (IOException e) {
             LOG.log(Level.FINE, "cannot extract " + resource, e);
             return null;
+        }
+    }
+
+    /**
+     * Creates {@code dir} and its missing parents. The cache directory and everything created below it are
+     * accessible to the owner only where the file system has POSIX permissions.
+     */
+    private static void createDirectories(Path dir) throws IOException {
+        if (Files.isDirectory(dir)) {
+            return;
+        }
+        boolean posix = FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+        Path root = CACHE.getParent();
+        if (!Files.isDirectory(root)) {
+            Files.createDirectories(root.getParent());
+            create(root, posix);
+        }
+        if (posix) {
+            Files.setPosixFilePermissions(root, OWNER_ONLY);
+        }
+        Path current = root;
+        for (Path name : root.relativize(dir)) {
+            current = current.resolve(name);
+            if (!Files.isDirectory(current)) {
+                create(current, posix);
+            }
+        }
+    }
+
+    private static void create(Path dir, boolean posix) throws IOException {
+        try {
+            if (posix) {
+                Files.createDirectory(dir, PosixFilePermissions.asFileAttribute(OWNER_ONLY));
+            } else {
+                Files.createDirectory(dir);
+            }
+        } catch (FileAlreadyExistsException e) {
+            if (!Files.isDirectory(dir)) {
+                throw e;
+            }
+        }
+    }
+
+    private static String digest(String text) {
+        try {
+            byte[] hash = MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(hash, 0, 16);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is not available", e);
         }
     }
 

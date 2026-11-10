@@ -181,7 +181,7 @@ public final class JavaUsages {
         if (function.functionClass() == null || function.signature() == null) {
             return false;
         }
-        String method = function.signature().replaceFirst("\\s*\\(.*", "").replaceFirst(".*\\s", "");
+        String method = Tags.javaMethodName(function);
         return JType.parse(function.functionClass()).name().replace('$', '.').equals(member.declaringType())
                 && method.equals(member.name()) && function.parameterTypes().size() == member.parameterCount();
     }

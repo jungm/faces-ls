@@ -4,26 +4,41 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
+import org.eclipse.jdt.core.ElementChangedEvent;
+import org.eclipse.jdt.core.JavaCore;
 import org.osgi.framework.BundleActivator;
 import org.osgi.framework.BundleContext;
 
 /**
- * Starts the socket server that faces-ls connects to. jdtls starts bundles listed in its {@code bundles}
- * initialization option eagerly, so this runs when jdtls initializes.
+ * Starts the socket server that faces-ls connects to and forwards Java model changes to it. jdtls starts bundles
+ * listed in its {@code bundles} initialization option eagerly, so this runs when jdtls initializes.
  */
 public class FacesJdtActivator implements BundleActivator {
     private JdtServer server;
+    private JavaChangeListener changes;
 
     @Override
     public void start(BundleContext context) throws Exception {
         Path rendezvous = rendezvousDirectory(context.getBundle().getLocation());
         String version = context.getBundle().getVersion().toString();
-        server = new JdtServer(rendezvous, version);
-        server.start();
+        JavaModelService service = new JavaModelService(rendezvous.resolveSibling("faces-jdt-sources"));
+        JdtServer started = new JdtServer(rendezvous, version, service);
+        started.start();
+        server = started;
+        changes = new JavaChangeListener(() -> {
+            service.invalidate();
+            started.javaModelChanged();
+        }, started::javaChanged, started::log);
+        JavaCore.addElementChangedListener(changes, ElementChangedEvent.POST_CHANGE);
     }
 
     @Override
     public void stop(BundleContext context) {
+        if (changes != null) {
+            JavaCore.removeElementChangedListener(changes);
+            changes.close();
+            changes = null;
+        }
         if (server != null) {
             server.close();
             server = null;
@@ -40,8 +55,11 @@ public class FacesJdtActivator implements BundleActivator {
             location = location.substring("reference:".length());
         }
         Path jar;
-        if (location.startsWith("file:")) {
+        if (location.startsWith("file:/")) {
             jar = Paths.get(URI.create(location.replace(" ", "%20")));
+        } else if (location.startsWith("file:")) {
+            // relative to the working directory, e.g. reference:file:plugins/faces-jdt.jar
+            jar = Paths.get(location.substring("file:".length()));
         } else {
             jar = Paths.get(location);
         }

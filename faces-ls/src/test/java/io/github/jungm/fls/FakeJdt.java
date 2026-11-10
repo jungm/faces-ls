@@ -1,39 +1,68 @@
 package io.github.jungm.fls;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+
+import org.eclipse.lsp4j.jsonrpc.Launcher;
+import org.eclipse.lsp4j.jsonrpc.ResponseErrorException;
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseError;
+import org.eclipse.lsp4j.jsonrpc.messages.ResponseErrorCode;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
+import io.github.jungm.fls.java.FacesJdtEvents;
+import io.github.jungm.fls.java.FacesJdtService;
 import io.github.jungm.fls.java.JdtClient;
+import io.github.jungm.fls.project.ProjectModel;
 
 /**
- * A stand-in for faces-jdt: answers the socket protocol of {@link JdtClient} with types declared by the test, so
- * EL can be typed without jdtls.
+ * A stand-in for faces-jdt: serves the JSON-RPC protocol of {@link JdtClient} with types declared by the test, so
+ * EL can be typed without jdtls. Counts the requests per method and can fail the {@code type} requests of chosen
+ * types or hold back answers.
  */
 final class FakeJdt implements AutoCloseable {
+    private static final String TOKEN = "test";
+
     private final Path workspace;
     private final ServerSocket server;
-    private final Map<String, JsonObject> types = new HashMap<>();
+    private final Map<String, JsonObject> types = new ConcurrentHashMap<>();
     private final JsonArray beans = new JsonArray();
+    private final Map<String, AtomicInteger> requests = new ConcurrentHashMap<>();
+    private final Set<String> failingTypes = ConcurrentHashMap.newKeySet();
+    private final Map<String, Hold> holds = new ConcurrentHashMap<>();
+    private final List<FacesJdtEvents> clients = new CopyOnWriteArrayList<>();
+    private final ExecutorService threads = Executors.newCachedThreadPool(runnable -> {
+        Thread thread = new Thread(runnable, "fake-jdt");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final JdtClient client;
 
     FakeJdt(Path workspace, Path rendezvous) throws IOException {
+        this(workspace, rendezvous, event -> { });
+    }
+
+    FakeJdt(Path workspace, Path rendezvous, Consumer<String> events) throws IOException {
         this.workspace = workspace;
         this.server = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
         Files.createDirectories(rendezvous);
@@ -41,12 +70,10 @@ final class FakeJdt implements AutoCloseable {
         JsonObject info = new JsonObject();
         info.addProperty("pid", pid);
         info.addProperty("port", server.getLocalPort());
-        info.addProperty("token", "test");
+        info.addProperty("token", TOKEN);
         Files.writeString(rendezvous.resolve("jdtls-" + pid + ".json"), info.toString());
-        Thread acceptor = new Thread(this::accept, "fake-jdt");
-        acceptor.setDaemon(true);
-        acceptor.start();
-        client = new JdtClient(rendezvous, List.of(workspace), event -> { }, () -> { });
+        threads.execute(this::accept);
+        client = new JdtClient(rendezvous, List.of(workspace), events, () -> { });
         client.start();
         for (int i = 0; i < 100 && !client.connected(); i++) {
             sleep();
@@ -121,65 +148,175 @@ final class FakeJdt implements AutoCloseable {
         return this;
     }
 
+    /** Makes {@code type} requests for {@code fqn} fail with an error response until {@link #recover} is called. */
+    FakeJdt failing(String fqn) {
+        failingTypes.add(fqn);
+        return this;
+    }
+
+    FakeJdt recover(String fqn) {
+        failingTypes.remove(fqn);
+        return this;
+    }
+
+    /** Requests whose answer waits until {@link #release}. */
+    private record Hold(Predicate<JsonObject> applies, CompletableFuture<Void> gate) {
+    }
+
+    /** Holds back the answers to {@code method} requests whose parameters match, until {@link #release}. */
+    FakeJdt hold(String method, Predicate<JsonObject> applies) {
+        holds.put(method, new Hold(applies, new CompletableFuture<>()));
+        return this;
+    }
+
+    /** Sends the held answers to {@code method} requests and answers later ones at once. */
+    FakeJdt release(String method) {
+        Hold hold = holds.remove(method);
+        if (hold != null) {
+            hold.gate().complete(null);
+        }
+        return this;
+    }
+
+    /** How many requests of {@code method} were received. */
+    int requests(String method) {
+        AtomicInteger count = requests.get(method);
+        return count == null ? 0 : count.get();
+    }
+
+    /** Pushes the {@code javaChanged} notification to the connected clients. */
+    void javaChanged() {
+        clients.forEach(FacesJdtEvents::javaChanged);
+    }
+
     private void accept() {
         while (!server.isClosed()) {
             try {
                 Socket socket = server.accept();
-                Thread handler = new Thread(() -> serve(socket), "fake-jdt-connection");
-                handler.setDaemon(true);
-                handler.start();
+                Launcher<FacesJdtEvents> launcher = new Launcher.Builder<FacesJdtEvents>()
+                        .setLocalService(new Service())
+                        .setRemoteInterface(FacesJdtEvents.class)
+                        .setInput(socket.getInputStream())
+                        .setOutput(socket.getOutputStream())
+                        .setExecutorService(threads)
+                        .create();
+                clients.add(launcher.getRemoteProxy());
+                launcher.startListening();
             } catch (IOException e) {
                 return;
             }
         }
     }
 
-    private void serve(Socket socket) {
-        try (socket;
-             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-             Writer writer = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8)) {
-            reader.readLine(); // hello with the token
-            String line;
-            while ((line = reader.readLine()) != null) {
-                JsonObject request = JsonParser.parseString(line).getAsJsonObject();
-                JsonObject response = new JsonObject();
-                response.add("id", request.get("id"));
-                response.add("result", answer(request.get("method").getAsString(), request.getAsJsonObject("params")));
-                writer.write(response + "\n");
-                writer.flush();
+    private final class Service implements FacesJdtService {
+        private CompletableFuture<JsonElement> answer(String method, JsonObject params, JsonElement result) {
+            requests.computeIfAbsent(method, key -> new AtomicInteger()).incrementAndGet();
+            Hold hold = holds.get(method);
+            if (hold != null && hold.applies().test(params)) {
+                return hold.gate().thenApply(released -> result);
             }
-        } catch (IOException | RuntimeException e) {
-            // connection closed
+            return CompletableFuture.completedFuture(result);
         }
-    }
 
-    private JsonElement answer(String method, JsonObject params) {
-        switch (method) {
-            case "ping" -> {
-                JsonObject project = new JsonObject();
-                project.addProperty("location", workspace.toString());
-                JsonArray projects = new JsonArray();
-                projects.add(project);
-                JsonObject result = new JsonObject();
-                result.add("projects", projects);
-                return result;
+        @Override
+        public CompletableFuture<JsonObject> authenticate(JsonObject params) {
+            if (!TOKEN.equals(params.get("token").getAsString())) {
+                return CompletableFuture.failedFuture(
+                        new ResponseErrorException(new ResponseError(ResponseErrorCode.InvalidRequest, "invalid token", null)));
             }
-            case "project" -> {
-                JsonObject result = new JsonObject();
-                result.add("sourceFolders", new JsonArray());
-                result.add("classpath", new JsonArray());
-                return result;
+            return CompletableFuture.completedFuture(new JsonObject());
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> ping(JsonObject params) {
+            JsonObject project = new JsonObject();
+            project.addProperty("location", workspace.toString());
+            JsonArray projects = new JsonArray();
+            projects.add(project);
+            JsonObject result = new JsonObject();
+            result.add("projects", projects);
+            return answer("ping", params, result);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> project(JsonObject params) {
+            JsonObject result = new JsonObject();
+            result.add("sourceFolders", new JsonArray());
+            result.add("classpath", new JsonArray());
+            return answer("project", params, result);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> beans(JsonObject params) {
+            return answer("beans", params, beans);
+        }
+
+        /** The declared type followed by its declared supertypes, as faces-jdt answers. */
+        @Override
+        public CompletableFuture<JsonElement> type(JsonObject params) {
+            String fqn = params.get("fqn").getAsString();
+            if (failingTypes.contains(fqn)) {
+                requests.computeIfAbsent("type", key -> new AtomicInteger()).incrementAndGet();
+                return CompletableFuture.failedFuture(
+                        new ResponseErrorException(new ResponseError(ResponseErrorCode.InternalError, "busy", null)));
             }
-            case "beans" -> {
-                return beans;
+            JsonObject root = types.get(fqn);
+            if (root == null) {
+                return answer("type", params, JsonNull.INSTANCE);
             }
-            case "type" -> {
-                JsonObject type = types.get(params.get("fqn").getAsString());
-                return type == null ? JsonNull.INSTANCE : type;
+            JsonArray result = new JsonArray();
+            Set<String> seen = new HashSet<>();
+            Deque<JsonObject> queue = new ArrayDeque<>(List.of(root));
+            while (!queue.isEmpty()) {
+                JsonObject current = queue.poll();
+                if (!seen.add(current.get("fqn").getAsString())) {
+                    continue;
+                }
+                result.add(current);
+                for (JsonElement supertype : current.getAsJsonArray("supertypes")) {
+                    String name = supertype.getAsString();
+                    JsonObject declared = types.get(name.contains("<") ? name.substring(0, name.indexOf('<')) : name);
+                    if (declared != null) {
+                        queue.add(declared);
+                    }
+                }
             }
-            default -> {
-                return JsonNull.INSTANCE;
-            }
+            return answer("type", params, result);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> location(JsonObject params) {
+            return answer("location", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> javadoc(JsonObject params) {
+            return answer("javadoc", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> findTypes(JsonObject params) {
+            return answer("findTypes", params, new JsonArray());
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> callHierarchyPrepare(JsonObject params) {
+            return answer("callHierarchy/prepare", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> callHierarchyIncoming(JsonObject params) {
+            return answer("callHierarchy/incoming", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> callHierarchyOutgoing(JsonObject params) {
+            return answer("callHierarchy/outgoing", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> member(JsonObject params) {
+            return answer("member", params, JsonNull.INSTANCE);
         }
     }
 
@@ -192,7 +329,7 @@ final class FakeJdt implements AutoCloseable {
     }
 
     /** Waits until the project's background bean search has finished, so unknown names are reported. */
-    static void awaitBeans(io.github.jungm.fls.project.ProjectModel project) {
+    static void awaitBeans(ProjectModel project) {
         project.beans();
         for (int i = 0; i < 100 && !project.beansLoaded(); i++) {
             sleep();
@@ -203,5 +340,6 @@ final class FakeJdt implements AutoCloseable {
     public void close() throws IOException {
         client.close();
         server.close();
+        threads.shutdownNow();
     }
 }

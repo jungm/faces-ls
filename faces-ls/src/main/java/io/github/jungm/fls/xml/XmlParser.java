@@ -80,15 +80,11 @@ final class XmlParser {
         return length;
     }
 
-    private static boolean isNameChar(char c) {
-        return Character.isLetterOrDigit(c) || c == ':' || c == '_' || c == '-' || c == '.';
-    }
-
     private void parseStartTag() {
         int start = pos;
         int nameStart = pos + 1;
         int i = nameStart;
-        while (i < length && isNameChar(text.charAt(i))) {
+        while (i < length && XmlDocument.isNameChar(text.charAt(i))) {
             i++;
         }
         XmlElement element = new XmlElement(text.substring(nameStart, i), start, nameStart, i);
@@ -131,12 +127,12 @@ final class XmlParser {
                 // a new tag starts before this one was closed
                 return;
             }
-            if (Character.isWhitespace(c) || !isNameChar(c)) {
+            if (Character.isWhitespace(c) || !XmlDocument.isNameChar(c)) {
                 pos++;
                 continue;
             }
             int nameStart = pos;
-            while (pos < length && isNameChar(text.charAt(pos))) {
+            while (pos < length && XmlDocument.isNameChar(text.charAt(pos))) {
                 pos++;
             }
             int nameEnd = pos;
@@ -186,7 +182,7 @@ final class XmlParser {
         int start = pos;
         int nameStart = pos + 2;
         int i = nameStart;
-        while (i < length && isNameChar(text.charAt(i))) {
+        while (i < length && XmlDocument.isNameChar(text.charAt(i))) {
             i++;
         }
         String name = text.substring(nameStart, i);

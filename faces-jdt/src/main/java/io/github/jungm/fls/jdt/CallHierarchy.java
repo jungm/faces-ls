@@ -159,43 +159,67 @@ final class CallHierarchy {
                 return null;
             }
             JsonObject start = item.getAsJsonObject("selectionRange").getAsJsonObject("start");
-            int offset = offset(root.getSource(), start.get("line").getAsInt(), start.get("character").getAsInt());
-            IJavaElement element = root.getElementAt(offset);
-            JsonObject member = new JsonObject();
-            switch (element) {
-                case IMethod method -> {
-                    member.addProperty("declaringType", method.getDeclaringType().getFullyQualifiedName('.'));
-                    member.addProperty("name", method.getElementName());
-                    member.addProperty("kind", method.isConstructor() ? "constructor" : "method");
-                    member.addProperty("parameterCount", method.getNumberOfParameters());
-                }
-                case IField field -> {
-                    member.addProperty("declaringType", field.getDeclaringType().getFullyQualifiedName('.'));
-                    member.addProperty("name", field.getElementName());
-                    member.addProperty("kind", "field");
-                    member.addProperty("parameterCount", -1);
-                }
-                case IType type -> {
-                    member.addProperty("declaringType", type.getFullyQualifiedName('.'));
-                    member.addProperty("name", type.getElementName());
-                    member.addProperty("kind", "type");
-                    member.addProperty("parameterCount", -1);
-                }
-                case null, default -> {
-                    return null;
-                }
-            }
-            return member;
+            int offset = SourcePositions.offset(root.getSource(), start.get("line").getAsInt(), start.get("character").getAsInt());
+            return describe(root.getElementAt(offset));
         } catch (JavaModelException | RuntimeException e) {
             return null;
         }
     }
 
+    /**
+     * {@code {uri, line, character}}: the member named at a position, where it is declared or used, as
+     * {@code {declaringType, name, kind, parameterCount}}; null when the position names no method, field or type.
+     */
+    static JsonElement memberAt(JsonObject params) throws JavaModelException {
+        ITypeRoot root = typeRoot(params.get("uri").getAsString());
+        if (root == null || root.getSource() == null) {
+            return JsonNull.INSTANCE;
+        }
+        int offset = SourcePositions.offset(root.getSource(), params.get("line").getAsInt(), params.get("character").getAsInt());
+        IJavaElement[] selected = root.codeSelect(offset, 0);
+        JsonObject member = selected.length == 1 ? describe(selected[0]) : null;
+        return member == null ? JsonNull.INSTANCE : member;
+    }
+
+    private static JsonObject describe(IJavaElement element) {
+        JsonObject member = new JsonObject();
+        switch (element) {
+            case IMethod method -> {
+                member.addProperty("declaringType", method.getDeclaringType().getFullyQualifiedName('.'));
+                member.addProperty("name", method.getElementName());
+                try {
+                    member.addProperty("kind", method.isConstructor() ? "constructor" : "method");
+                } catch (JavaModelException e) {
+                    member.addProperty("kind", "method");
+                }
+                member.addProperty("parameterCount", method.getNumberOfParameters());
+            }
+            case IField field -> {
+                member.addProperty("declaringType", field.getDeclaringType().getFullyQualifiedName('.'));
+                member.addProperty("name", field.getElementName());
+                member.addProperty("kind", "field");
+                member.addProperty("parameterCount", -1);
+            }
+            case IType type -> {
+                member.addProperty("declaringType", type.getFullyQualifiedName('.'));
+                member.addProperty("name", type.getElementName());
+                member.addProperty("kind", "type");
+                member.addProperty("parameterCount", -1);
+            }
+            case null, default -> {
+                return null;
+            }
+        }
+        return member;
+    }
+
     private static ITypeRoot typeRoot(String uri) {
         if (uri.startsWith("file:")) {
+            // a file of a nested module is also a file of each enclosing project (the aggregator of a multi-module
+            // build); only the copy in the Java project that compiles it exists in the Java model
             IFile[] files = ResourcesPlugin.getWorkspace().getRoot().findFilesForLocationURI(URI.create(uri));
             for (IFile file : files) {
-                if (JavaCore.create(file) instanceof ITypeRoot root) {
+                if (JavaCore.create(file) instanceof ITypeRoot root && root.exists()) {
                     return root;
                 }
             }
@@ -209,15 +233,5 @@ final class CallHierarchy {
         } catch (ReflectiveOperationException | LinkageError e) {
             return null;
         }
-    }
-
-    private static int offset(String source, int line, int character) {
-        int offset = 0;
-        for (int current = 0; current < line && offset < source.length(); offset++) {
-            if (source.charAt(offset) == '\n') {
-                current++;
-            }
-        }
-        return Math.min(offset + character, source.length());
     }
 }

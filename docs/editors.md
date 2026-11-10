@@ -5,8 +5,9 @@ LSP client. For VS Code, use the [Faces extension](https://github.com/jungm/face
 
 It provides completion, hover, go to definition, diagnostics and code actions for tags, attributes and EL. EL type
 information (beans, properties, methods, Javadoc, navigation into Java) comes from **faces-jdt**, a bundle that runs
-inside the Eclipse Java language server (jdtls). Without jdtls everything else still works: tags, attributes,
-composite components, resource bundles, ids and paths.
+inside the Eclipse Java language server (jdtls). jdtls also supplies the project's classpath. Without it, tags and
+attributes of the standard and project tag libraries, the project's composite components and resource bundles,
+ids and paths still work; libraries in jars are not seen.
 
 ## Contents of the distribution
 
@@ -24,7 +25,11 @@ Requirements: Java 21 or newer (`JAVA_HOME`, or `java` on `PATH`). Extra JVM opt
 1. Start `bin/faces-ls` for Facelets files (stdio, no arguments). Most editors give `*.xhtml` the filetype `xhtml`.
 2. Add `lib/faces-jdt.jar` to the `bundles` initialization option of jdtls. jdtls loads it at startup and announces
    it in `lib/faces-jdt-rendezvous/`, where faces-ls finds it. Keep both jars in the same directory.
-3. Open a Java file once per session so the editor starts jdtls (faces-ls asks for it when it is missing).
+3. Open a Java file once per session so the editor starts jdtls (faces-ls offers to open one when no jdtls has
+   connected).
+
+jdtls runs on its own Java runtime, which has to be the version the jdtls release needs (Java 25 for current
+releases); faces-jdt runs inside it.
 
 ### Semantic tokens
 
@@ -48,8 +53,9 @@ highlighting.
 
 ### Settings
 
-Pass settings as initialization options, or with `workspace/didChangeConfiguration` (either as is or under a
-`faces` key):
+Pass settings as initialization options (as is, or wrapped as `{"settings": {...}}`). `namespaces` and `imports`
+can also be changed with `workspace/didChangeConfiguration` (as is, or under a `faces` or `faces-ls` key);
+`log_file` and `jdt_rendezvous` are read at initialization only.
 
 | Setting | Meaning |
 |---|---|
@@ -61,13 +67,14 @@ Pass settings as initialization options, or with `workspace/didChangeConfigurati
 faces-ls also provides call hierarchy (who uses a composite, include or template), references and a code lens
 with usage counts, based on an index of all Facelets files in the workspace folders.
 
-For Java files, faces-ls answers the call hierarchy too: jdtls' own (through faces-jdt) plus the Facelets files
-whose EL uses the member. To get it, send `textDocument/prepareCallHierarchy` and the incoming/outgoing calls for
-Java documents to faces-ls instead of jdtls while it reports `{"connected": true}` in the `faces/javaStatus`
-notification.
+For Java files, faces-ls answers references and the call hierarchy too, while it reports `{"connected": true}` in
+the `faces/javaStatus` notification. `textDocument/references` on a Java member answers the EL usages of it in
+Facelets files; send it to faces-ls besides jdtls and show both answers. The call hierarchy is jdtls' own (through
+faces-jdt) plus the Facelets files whose EL uses the member; send `textDocument/prepareCallHierarchy` and the
+incoming/outgoing calls for Java documents to faces-ls instead of jdtls.
 
-Code action kinds: `quickfix` (declare a namespace, add required attributes) and `source.addMissingImports`
-(declare all missing namespaces), which editors can run on save.
+Code action kinds: `quickfix` (declare an undeclared prefix that is predefined in `namespaces`, add missing
+required attributes) and `source.addMissingImports` (declare all such prefixes), which editors can run on save.
 
 ## Neovim 0.11+
 

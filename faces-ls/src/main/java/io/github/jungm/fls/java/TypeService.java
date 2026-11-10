@@ -19,7 +19,8 @@ import com.google.gson.JsonObject;
 
 /**
  * Java type information from faces-jdt with type-argument substitution across the type hierarchy, so that
- * {@code List<User>.get(int)} yields {@code User}. Results are cached until jdtls reports a Java change.
+ * {@code List<User>.get(int)} yields {@code User}. Answers are cached until jdtls reports a Java change; a missing
+ * answer (no connection, timeout, error) is not, so the next lookup asks again.
  */
 public final class TypeService {
 
@@ -64,10 +65,26 @@ public final class TypeService {
         }
     }
 
+    private static final long TYPE_TIMEOUT_MILLIS = 8000;
+
     private final JdtClient client;
     private final String projectPath;
-    private final Map<String, Optional<TypeInfo>> infos = new ConcurrentHashMap<>();
-    private final Map<String, Members> members = new ConcurrentHashMap<>();
+    /**
+     * The caches of the current generation. {@link #invalidate()} replaces them, and a computation stores its result
+     * in the caches it started with, so that answers to requests sent before an invalidation are not cached.
+     */
+    private volatile Caches caches = new Caches();
+
+    private static final class Caches {
+        /** Answers of faces-jdt by type name: empty for types it reported as not existing. */
+        final Map<String, Optional<TypeInfo>> infos = new ConcurrentHashMap<>();
+        final Map<String, Members> members = new ConcurrentHashMap<>();
+    }
+
+    /** Tracks whether every type lookup of a computation got an answer, i.e. whether its result may be cached. */
+    private static final class Lookups {
+        boolean complete = true;
+    }
 
     public TypeService(JdtClient client, String projectPath) {
         this.client = client;
@@ -79,8 +96,7 @@ public final class TypeService {
     }
 
     public void invalidate() {
-        infos.clear();
-        members.clear();
+        caches = new Caches();
     }
 
     private JsonObject params() {
@@ -89,22 +105,54 @@ public final class TypeService {
         return params;
     }
 
+    /** The description of a type, or null when it does not exist or faces-jdt gave no answer. */
     public TypeInfo info(String fqn) {
+        Optional<TypeInfo> answer = lookup(fqn);
+        return answer == null ? null : answer.orElse(null);
+    }
+
+    private TypeInfo info(String fqn, Lookups lookups) {
+        Optional<TypeInfo> answer = lookup(fqn);
+        if (answer == null) {
+            lookups.complete = false;
+            return null;
+        }
+        return answer.orElse(null);
+    }
+
+    /**
+     * The cached or requested answer for a type: empty when faces-jdt reported that the type does not exist, null when
+     * it gave no answer. One request returns the type together with all its supertypes, which are cached as well.
+     */
+    private Optional<TypeInfo> lookup(String fqn) {
         if (!available()) {
             return null;
         }
-        Optional<TypeInfo> cached = infos.get(fqn);
+        Caches current = caches;
+        Optional<TypeInfo> cached = current.infos.get(fqn);
         if (cached != null) {
-            return cached.orElse(null);
+            return cached;
         }
         JsonObject params = params();
         params.addProperty("fqn", fqn);
-        JsonElement response = client.request("type", params);
-        TypeInfo info = response.isJsonObject() ? toInfo(response.getAsJsonObject()) : null;
-        if (client.connected()) {
-            infos.put(fqn, Optional.ofNullable(info));
+        Optional<JsonElement> response = client.query("type", params, TYPE_TIMEOUT_MILLIS);
+        if (response.isEmpty()) {
+            return null;
         }
-        return info;
+        Map<String, Optional<TypeInfo>> answered = new HashMap<>();
+        Optional<TypeInfo> result = Optional.empty();
+        if (response.get() instanceof JsonArray descriptions) {
+            for (JsonElement description : descriptions) {
+                TypeInfo info = toInfo(description.getAsJsonObject());
+                if (result.isEmpty()) {
+                    result = Optional.of(info);
+                }
+                answered.putIfAbsent(info.fqn(), Optional.of(info));
+            }
+        }
+        answered.put(fqn, result);
+        current.infos.putAll(answered);
+        return result;
     }
 
     private static TypeInfo toInfo(JsonObject json) {
@@ -149,6 +197,10 @@ public final class TypeService {
 
     /** Walks the hierarchy breadth-first, yielding each supertype parameterized as seen from {@code type}. */
     public List<JType> hierarchy(JType type) {
+        return hierarchy(type, new Lookups());
+    }
+
+    private List<JType> hierarchy(JType type, Lookups lookups) {
         List<JType> result = new ArrayList<>();
         Deque<JType> queue = new ArrayDeque<>();
         Set<String> seen = new HashSet<>();
@@ -159,7 +211,7 @@ public final class TypeService {
                 continue;
             }
             result.add(current);
-            TypeInfo info = info(current.name());
+            TypeInfo info = info(current.name(), lookups);
             if (info == null) {
                 continue;
             }
@@ -183,10 +235,14 @@ public final class TypeService {
 
     /** The parameterization of {@code targetFqn} in the hierarchy of {@code type}, e.g. Iterable&lt;User&gt;. */
     public JType asSupertype(JType type, String targetFqn) {
+        return asSupertype(type, targetFqn, new Lookups());
+    }
+
+    private JType asSupertype(JType type, String targetFqn, Lookups lookups) {
         if (type.isArray()) {
             return null;
         }
-        for (JType supertype : hierarchy(type)) {
+        for (JType supertype : hierarchy(type, lookups)) {
             if (supertype.name().equals(targetFqn)) {
                 return supertype;
             }
@@ -203,20 +259,22 @@ public final class TypeService {
             return new Members(type, Map.of(), List.of(), List.of());
         }
         String key = type.toString();
-        Members cached = members.get(key);
+        Caches generation = caches;
+        Members cached = generation.members.get(key);
         if (cached != null) {
             return cached;
         }
+        Lookups lookups = new Lookups();
         Map<String, MethodInfo> methodsBySignature = new LinkedHashMap<>();
+        // all overloads, for the setters of properties
+        Map<String, MethodInfo> methodsByErasure = new LinkedHashMap<>();
         Map<String, FieldInfo> fieldsByName = new LinkedHashMap<>();
         List<String> recordComponents = new ArrayList<>();
-        boolean any = false;
-        for (JType current : hierarchy(type)) {
-            TypeInfo info = info(current.name());
+        for (JType current : hierarchy(type, lookups)) {
+            TypeInfo info = info(current.name(), lookups);
             if (info == null) {
                 continue;
             }
-            any = true;
             if (current == type || current.name().equals(type.name())) {
                 recordComponents.addAll(info.recordComponents());
             }
@@ -230,52 +288,111 @@ public final class TypeService {
                         method.returnType().substitute(bindings), method.isStatic(), method.varargs(), method.deprecated(),
                         method.declaringType());
                 methodsBySignature.putIfAbsent(method.name() + "/" + parameters.size(), substituted);
+                methodsByErasure.putIfAbsent(erasedSignature(substituted), substituted);
             }
             for (FieldInfo field : info.fields()) {
                 fieldsByName.putIfAbsent(field.name(), new FieldInfo(field.name(), field.type().substitute(bindings),
                         field.isStatic(), field.enumConstant(), field.declaringType()));
             }
         }
-        Members result = new Members(type, properties(methodsBySignature.values(), recordComponents),
+        Members result = new Members(type, properties(methodsByErasure.values(), recordComponents, lookups),
                 List.copyOf(methodsBySignature.values()), List.copyOf(fieldsByName.values()));
-        if (any && client.connected()) {
-            members.put(key, result);
+        if (lookups.complete) {
+            generation.members.put(key, result);
         }
         return result;
     }
 
-    private static Map<String, Property> properties(Collection<MethodInfo> methods, List<String> recordComponents) {
-        Map<String, MethodInfo> getters = new LinkedHashMap<>();
-        Map<String, MethodInfo> setters = new LinkedHashMap<>();
+    private static String erasedSignature(MethodInfo method) {
+        StringBuilder signature = new StringBuilder(method.name()).append('(');
+        for (JType parameter : method.parameters()) {
+            signature.append(parameter.name()).append("[]".repeat(parameter.dimensions())).append(',');
+        }
+        return signature.append(')').toString();
+    }
+
+    /**
+     * Properties as {@code java.beans.Introspector} (and so Jakarta EL's {@code BeanELResolver}) finds them:
+     * <ul>
+     * <li>a getter is a public instance method without parameters, {@code getX()} returning anything but void, or
+     * {@code isX()} returning primitive {@code boolean}, which wins over {@code getX()}; record components count
+     * as getters too;</li>
+     * <li>a setter is {@code void setX(T)}. With a getter, only setters whose parameter type is assignable to the
+     * getter's type belong to the property, the most specific one of them; without such a setter the property is
+     * read-only. Without a getter, the first setter makes a write-only property.</li>
+     * </ul>
+     */
+    private Map<String, Property> properties(Collection<MethodInfo> methods, List<String> recordComponents, Lookups lookups) {
+        Map<String, MethodInfo> isGetters = new LinkedHashMap<>();
+        Map<String, MethodInfo> getGetters = new LinkedHashMap<>();
+        Map<String, MethodInfo> componentGetters = new LinkedHashMap<>();
+        Map<String, List<MethodInfo>> setters = new LinkedHashMap<>();
         for (MethodInfo method : methods) {
             if (method.isStatic()) {
                 continue;
             }
             String name = method.name();
             int parameterCount = method.parameters().size();
-            if (parameterCount == 0 && !method.returnType().isVoid()) {
-                if (name.startsWith("get") && name.length() > 3) {
-                    getters.putIfAbsent(decapitalize(name.substring(3)), method);
-                } else if (name.startsWith("is") && name.length() > 2
-                        && (method.returnType().name().equals("boolean") || method.returnType().name().equals("java.lang.Boolean"))) {
-                    getters.putIfAbsent(decapitalize(name.substring(2)), method);
+            JType returnType = method.returnType();
+            if (parameterCount == 0 && !returnType.isVoid()) {
+                if (name.startsWith("is") && name.length() > 2 && returnType.dimensions() == 0
+                        && returnType.name().equals("boolean")) {
+                    isGetters.putIfAbsent(decapitalize(name.substring(2)), method);
+                } else if (name.startsWith("get") && name.length() > 3) {
+                    getGetters.putIfAbsent(decapitalize(name.substring(3)), method);
                 } else if (recordComponents.contains(name)) {
-                    getters.putIfAbsent(name, method);
+                    componentGetters.putIfAbsent(name, method);
                 }
-            } else if (parameterCount == 1 && name.startsWith("set") && name.length() > 3) {
-                setters.putIfAbsent(decapitalize(name.substring(3)), method);
+            } else if (parameterCount == 1 && returnType.isVoid() && name.startsWith("set") && name.length() > 3) {
+                setters.computeIfAbsent(decapitalize(name.substring(3)), key -> new ArrayList<>()).add(method);
             }
         }
+        Map<String, MethodInfo> getters = new LinkedHashMap<>(isGetters);
+        getGetters.forEach(getters::putIfAbsent);
+        componentGetters.forEach(getters::putIfAbsent);
+
         Map<String, Property> properties = new LinkedHashMap<>();
         for (Map.Entry<String, MethodInfo> getter : getters.entrySet()) {
-            MethodInfo setter = setters.get(getter.getKey());
-            properties.put(getter.getKey(), new Property(getter.getKey(), getter.getValue().returnType(), getter.getValue(), setter));
+            JType type = getter.getValue().returnType();
+            MethodInfo setter = null;
+            for (MethodInfo candidate : setters.getOrDefault(getter.getKey(), List.of())) {
+                JType parameter = candidate.parameters().get(0);
+                if (assignable(parameter, type, lookups)
+                        && (setter == null || assignable(parameter, setter.parameters().get(0), lookups))) {
+                    setter = candidate;
+                }
+            }
+            properties.put(getter.getKey(), new Property(getter.getKey(), type, getter.getValue(), setter));
         }
-        for (Map.Entry<String, MethodInfo> setter : setters.entrySet()) {
-            properties.computeIfAbsent(setter.getKey(),
-                    name -> new Property(name, setter.getValue().parameters().get(0), null, setter.getValue()));
+        for (Map.Entry<String, List<MethodInfo>> setter : setters.entrySet()) {
+            MethodInfo first = setter.getValue().get(0);
+            properties.computeIfAbsent(setter.getKey(), name -> new Property(name, first.parameters().get(0), null, first));
         }
         return properties;
+    }
+
+    /** Whether a value of type {@code from} can be assigned to {@code to}, by erasure as {@code Class.isAssignableFrom}. */
+    private boolean assignable(JType from, JType to, Lookups lookups) {
+        if (from.isPrimitive() || to.isPrimitive()) {
+            return from.dimensions() == to.dimensions() && from.name().equals(to.name());
+        }
+        if (from.dimensions() == to.dimensions() && from.name().equals(to.name())) {
+            return true;
+        }
+        if (to.dimensions() == 0) {
+            if (to.name().equals("java.lang.Object")) {
+                return true;
+            }
+            if (from.isArray()) {
+                return to.name().equals("java.lang.Cloneable") || to.name().equals("java.io.Serializable");
+            }
+            return asSupertype(JType.of(from.name()), to.name(), lookups) != null;
+        }
+        if (from.dimensions() < to.dimensions()) {
+            return false;
+        }
+        // arrays are covariant: compare the components left after removing the target's dimensions
+        return assignable(new JType(from.name(), List.of(), from.dimensions() - to.dimensions()), JType.of(to.name()), lookups);
     }
 
     /** {@link java.beans.Introspector#decapitalize}. */

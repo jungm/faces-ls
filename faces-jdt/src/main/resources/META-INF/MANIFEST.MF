@@ -12,5 +12,5 @@ Require-Bundle: org.eclipse.core.runtime,
  com.google.gson,
  org.eclipse.jdt.ls.core;resolution:=optional,
  org.eclipse.lsp4j;resolution:=optional,
- org.eclipse.lsp4j.jsonrpc;resolution:=optional
+ org.eclipse.lsp4j.jsonrpc
 Export-Package: io.github.jungm.fls.jdt

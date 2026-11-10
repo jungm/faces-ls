@@ -6,14 +6,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.lang.reflect.Modifier;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -33,7 +36,6 @@ import org.eclipse.jdt.core.IMethod;
 import org.eclipse.jdt.core.IPackageFragmentRoot;
 import org.eclipse.jdt.core.ISourceRange;
 import org.eclipse.jdt.core.IType;
-import org.eclipse.jdt.core.ITypeRoot;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
 import org.eclipse.jdt.core.dom.AST;
@@ -61,7 +63,7 @@ import com.google.gson.JsonObject;
  * Answers faces-ls queries from the jdtls Java model. Types are described from DOM bindings, so member types
  * are fully qualified and keep their type arguments (type variables of the declaring type stay as names).
  */
-final class JavaModelService {
+final class JavaModelService implements JavaQueries {
     private static final List<String> NAMED_ANNOTATIONS = List.of(
             "jakarta.inject.Named", "javax.inject.Named",
             "jakarta.enterprise.inject.Model", "javax.enterprise.inject.Model",
@@ -71,11 +73,18 @@ final class JavaModelService {
             "RequestScoped", "SessionScoped", "ApplicationScoped", "ConversationScoped", "Dependent",
             "ViewScoped", "FlowScoped", "NoneScoped", "CustomScoped", "Model", "ClientWindowScoped");
 
+    /** Type descriptions by project and fully qualified name; {@link JsonNull} for types that do not exist. */
     private final Map<String, JsonElement> typeCache = new ConcurrentHashMap<>();
     private final Path sourcesDir;
     private final Map<String, JsonElement> beanCache = new ConcurrentHashMap<>();
-    /** Beans found in a library jar, by jar path and timestamp; kept across source changes. */
-    private final Map<String, List<IMember>> libraryBeans = new ConcurrentHashMap<>();
+    /** Increments on {@link #invalidate()}; results computed across an invalidation are not cached. */
+    private final AtomicLong generation = new AtomicLong();
+    /** Beans found in a library jar, by jar path; kept across source changes until the jar itself changes. */
+    private final Map<String, LibraryBeans> libraryBeans = new ConcurrentHashMap<>();
+
+    /** @param stamp modification time and size of the jar the beans were found in */
+    private record LibraryBeans(String stamp, List<IMember> members) {
+    }
 
     /** @param sourcesDir where library sources are extracted for navigation, or null */
     JavaModelService(Path sourcesDir) {
@@ -83,53 +92,81 @@ final class JavaModelService {
     }
 
     void invalidate() {
+        generation.incrementAndGet();
         typeCache.clear();
         beanCache.clear();
     }
 
-    JsonElement handle(String method, JsonObject params) throws CoreException {
-        return switch (method) {
-            case "ping" -> ping();
-            case "project" -> describeProject(findProject(params.get("path").getAsString()));
-            case "beans" -> withProject(params, this::beans);
-            case "type" -> withProject(params, project -> type(project, params.get("fqn").getAsString()));
-            case "location" -> withProject(params, project -> location(project, params));
-            case "javadoc" -> withProject(params, project -> javadoc(project, params));
-            case "findTypes" -> withProject(params, project -> findTypes(project, params.get("prefix").getAsString(),
-                    params.has("limit") ? params.get("limit").getAsInt() : 50));
-            case "callHierarchy/prepare" -> callHierarchy(() -> CallHierarchy.get().prepare(params));
-            case "callHierarchy/incoming" -> callHierarchy(() -> CallHierarchy.get().incoming(params));
-            case "callHierarchy/outgoing" -> callHierarchy(() -> CallHierarchy.get().outgoing(params));
-            default -> throw new IllegalArgumentException("unknown method " + method);
-        };
+    @Override
+    public JsonElement project(JsonObject params) throws JavaModelException, QueryException {
+        return describeProject(project(params, "project"));
     }
 
-    private interface Reflective {
-        JsonElement get() throws ReflectiveOperationException;
+    @Override
+    public JsonElement beans(JsonObject params) throws CoreException, QueryException {
+        return beans(project(params, "beans"));
     }
 
-    private static JsonElement callHierarchy(Reflective call) {
-        try {
-            return call.get();
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException("jdtls call hierarchy not usable", e);
+    @Override
+    public JsonElement type(JsonObject params) throws JavaModelException, QueryException {
+        return typeWithSupertypes(project(params, "type"), params.get("fqn").getAsString());
+    }
+
+    @Override
+    public JsonElement location(JsonObject params) throws JavaModelException, QueryException {
+        return location(project(params, "location"), params);
+    }
+
+    @Override
+    public JsonElement javadoc(JsonObject params) throws JavaModelException, QueryException {
+        return javadoc(project(params, "javadoc"), params);
+    }
+
+    @Override
+    public JsonElement findTypes(JsonObject params) throws JavaModelException, QueryException {
+        return findTypes(project(params, "findTypes"), params.get("prefix").getAsString(),
+                params.has("limit") ? params.get("limit").getAsInt() : 50);
+    }
+
+    @Override
+    public JsonElement callHierarchyPrepare(JsonObject params) throws ReflectiveOperationException {
+        return CallHierarchy.get().prepare(params);
+    }
+
+    @Override
+    public JsonElement callHierarchyIncoming(JsonObject params) throws ReflectiveOperationException {
+        return CallHierarchy.get().incoming(params);
+    }
+
+    @Override
+    public JsonElement callHierarchyOutgoing(JsonObject params) throws ReflectiveOperationException {
+        return CallHierarchy.get().outgoing(params);
+    }
+
+    @Override
+    public JsonElement member(JsonObject params) throws JavaModelException {
+        return CallHierarchy.memberAt(params);
+    }
+
+    /**
+     * The project containing {@code params.path}. Fails when jdtls has no such project (yet): that is no answer about
+     * the Java model, and the client must not take it for a type or member that does not exist.
+     */
+    private static IJavaProject project(JsonObject params, String method) throws JavaModelException, QueryException {
+        String path = params.get("path").getAsString();
+        IJavaProject project = findProject(path);
+        if (project == null) {
+            throw new QueryException(method + ": no Java project contains " + path);
         }
-    }
-
-    private interface ProjectFunction {
-        JsonElement apply(IJavaProject project) throws CoreException;
-    }
-
-    private JsonElement withProject(JsonObject params, ProjectFunction function) throws CoreException {
-        IJavaProject project = findProject(params.get("path").getAsString());
-        return project == null ? JsonNull.INSTANCE : function.apply(project);
+        return project;
     }
 
     private static IJavaProject[] javaProjects() throws JavaModelException {
         return JavaCore.create(ResourcesPlugin.getWorkspace().getRoot()).getJavaProjects();
     }
 
-    private JsonElement ping() throws JavaModelException {
+    @Override
+    public JsonElement ping() throws JavaModelException {
         JsonObject result = new JsonObject();
         result.addProperty("pid", ProcessHandle.current().pid());
         JsonArray projects = new JsonArray();
@@ -173,9 +210,6 @@ final class JavaModelService {
     }
 
     private JsonElement describeProject(IJavaProject project) throws JavaModelException {
-        if (project == null) {
-            return JsonNull.INSTANCE;
-        }
         JsonObject result = new JsonObject();
         result.addProperty("name", project.getElementName());
         result.addProperty("location", project.getProject().getLocation().toOSString());
@@ -220,6 +254,7 @@ final class JavaModelService {
         if (cached != null) {
             return cached;
         }
+        long started = generation.get();
         List<IMember> annotated = new ArrayList<>(searchNamed(SearchEngine.createJavaSearchScope(new IJavaElement[] {project},
                 IJavaSearchScope.SOURCES | IJavaSearchScope.REFERENCED_PROJECTS)));
 
@@ -228,9 +263,9 @@ final class JavaModelService {
             if (root.getKind() != IPackageFragmentRoot.K_BINARY || isSystemLibrary(root)) {
                 continue;
             }
-            List<IMember> known = libraryBeans.get(libraryKey(root));
-            if (known != null) {
-                annotated.addAll(known);
+            LibraryBeans known = libraryBeans.get(libraryPath(root));
+            if (known != null && known.stamp().equals(libraryStamp(root))) {
+                annotated.addAll(known.members());
             } else {
                 pending.add(root);
             }
@@ -244,7 +279,8 @@ final class JavaModelService {
                         ofRoot.add(member);
                     }
                 }
-                libraryBeans.put(libraryKey(root), List.copyOf(ofRoot));
+                // replaces the entry of an older version of the same jar
+                libraryBeans.put(libraryPath(root), new LibraryBeans(libraryStamp(root), List.copyOf(ofRoot)));
             }
             annotated.addAll(found);
         }
@@ -261,7 +297,9 @@ final class JavaModelService {
         }
         JsonArray result = new JsonArray();
         beans.values().forEach(result::add);
-        beanCache.put(key, result);
+        if (generation.get() == started) {
+            beanCache.put(key, result);
+        }
         return result;
     }
 
@@ -294,9 +332,13 @@ final class JavaModelService {
                 && raw.getPath().segment(0).equals("org.eclipse.jdt.launching.JRE_CONTAINER");
     }
 
-    private static String libraryKey(IPackageFragmentRoot root) {
+    private static String libraryPath(IPackageFragmentRoot root) {
+        return root.getPath().toOSString();
+    }
+
+    private static String libraryStamp(IPackageFragmentRoot root) {
         File file = root.getPath().toFile();
-        return root.getPath().toOSString() + ":" + file.lastModified() + ":" + file.length();
+        return file.lastModified() + ":" + file.length();
     }
 
     /** A class found both as source (workspace module) and in a jar on the classpath: keep the source. */
@@ -376,6 +418,7 @@ final class JavaModelService {
         return dot < 0 ? name : name.substring(dot + 1);
     }
 
+    /** CDI's default bean name rule (first character to lower case), not the JavaBeans one of {@code Introspector}. */
     private static String decapitalize(String name) {
         if (name.isEmpty()) {
             return name;
@@ -416,28 +459,93 @@ final class JavaModelService {
         return type;
     }
 
-    private JsonElement type(IJavaProject project, String fqn) throws JavaModelException {
+    /**
+     * The description of a type followed by those of all its supertypes (each once, breadth-first), or
+     * {@link JsonNull} when the type does not exist. Supertypes that cannot be resolved are left out.
+     */
+    private JsonElement typeWithSupertypes(IJavaProject project, String fqn) throws JavaModelException {
+        TypeWalk walk = new TypeWalk(project, new IdentityHashMap<>(), generation.get());
+        JsonElement root = type(walk, fqn, null);
+        if (!(root instanceof JsonObject rootType)) {
+            return JsonNull.INSTANCE;
+        }
+        JsonArray result = new JsonArray();
+        Set<String> seen = new HashSet<>();
+        Deque<JsonObject> queue = new ArrayDeque<>();
+        queue.add(rootType);
+        seen.add(rootType.get("fqn").getAsString());
+        while (!queue.isEmpty()) {
+            JsonObject current = queue.poll();
+            result.add(current);
+            ITypeBinding binding = walk.bindings().get(current);
+            for (JsonElement supertype : current.getAsJsonArray("supertypes")) {
+                String name = erasure(supertype.getAsString());
+                if (seen.add(name) && type(walk, name, supertypeBinding(binding, name)) instanceof JsonObject described) {
+                    queue.add(described);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static String erasure(String type) {
+        int angle = type.indexOf('<');
+        return angle < 0 ? type : type.substring(0, angle);
+    }
+
+    /** The declaration binding of a direct supertype called {@code name}, so it need not be looked up again. */
+    private static ITypeBinding supertypeBinding(ITypeBinding binding, String name) {
+        if (binding == null) {
+            return null;
+        }
+        List<ITypeBinding> supertypes = new ArrayList<>(List.of(binding.getInterfaces()));
+        if (binding.getSuperclass() != null) {
+            supertypes.add(0, binding.getSuperclass());
+        }
+        for (ITypeBinding supertype : supertypes) {
+            ITypeBinding declaration = supertype.getTypeDeclaration();
+            if (declaration.getErasure().getQualifiedName().equals(name) && !declaration.isRecovered()) {
+                return declaration;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * One {@link #typeWithSupertypes} call: the bindings of the descriptions it made, so their supertypes need no
+     * lookup, and the cache generation it started in.
+     */
+    private record TypeWalk(IJavaProject project, Map<JsonObject, ITypeBinding> bindings, long generation) {
+    }
+
+    /** The cached description of a type, made from {@code binding} when given or else from the type's name. */
+    private JsonElement type(TypeWalk walk, String fqn, ITypeBinding binding) throws JavaModelException {
+        IJavaProject project = walk.project();
         String key = project.getElementName() + '|' + fqn;
         JsonElement cached = typeCache.get(key);
         if (cached != null) {
             return cached;
         }
-        IType type = findType(project, fqn);
-        JsonElement result = type == null ? JsonNull.INSTANCE : describeType(project, type);
-        typeCache.put(key, result);
+        if (binding == null) {
+            IType type = findType(project, fqn);
+            binding = type != null && binding(project, type) instanceof ITypeBinding tb ? tb : null;
+        }
+        JsonElement result = binding == null ? JsonNull.INSTANCE : describeType(binding);
+        if (result instanceof JsonObject described) {
+            walk.bindings().put(described, binding);
+        }
+        if (generation.get() == walk.generation()) {
+            typeCache.put(key, result);
+        }
         return result;
     }
 
-    private JsonElement describeType(IJavaProject project, IType type) throws JavaModelException {
-        IBinding binding = binding(project, type);
-        if (!(binding instanceof ITypeBinding tb)) {
-            return JsonNull.INSTANCE;
-        }
+    private static JsonObject describeType(ITypeBinding tb) {
         JsonObject result = new JsonObject();
         result.addProperty("fqn", tb.getErasure().getQualifiedName());
         result.addProperty("kind", tb.isInterface() ? (tb.isAnnotation() ? "annotation" : "interface")
                 : tb.isEnum() ? "enum" : tb.isRecord() ? "record" : "class");
-        result.addProperty("source", !type.isBinary());
+        result.addProperty("source", tb.getJavaElement() instanceof IType type && !type.isBinary());
         result.addProperty("deprecated", tb.isDeprecated());
 
         JsonArray typeParameters = new JsonArray();
@@ -584,8 +692,8 @@ final class JavaModelService {
         JsonObject lspRange = new JsonObject();
         int offset = range == null || range.getOffset() < 0 ? 0 : range.getOffset();
         int length = range == null || range.getLength() < 0 ? 0 : range.getLength();
-        lspRange.add("start", position(source, offset));
-        lspRange.add("end", position(source, offset + length));
+        lspRange.add("start", SourcePositions.position(source, offset));
+        lspRange.add("end", SourcePositions.position(source, offset + length));
         location.add("range", lspRange);
         return location;
     }
@@ -617,64 +725,15 @@ final class JavaModelService {
         return file;
     }
 
-    private static JsonObject position(String source, int offset) {
-        int line = 0;
-        int lineStart = 0;
-        int limit = Math.min(offset, source == null ? 0 : source.length());
-        for (int i = 0; i < limit; i++) {
-            if (source.charAt(i) == '\n') {
-                line++;
-                lineStart = i + 1;
-            }
-        }
-        JsonObject position = new JsonObject();
-        position.addProperty("line", line);
-        position.addProperty("character", limit - lineStart);
-        return position;
-    }
-
-    private static final Pattern INLINE_TAG = Pattern.compile("\\{@(?:code|literal)\\s+([^}]*)}|\\{@(?:link|linkplain|value)\\s+([^}\\s]*)[^}]*}");
-
     private JsonElement javadoc(IJavaProject project, JsonObject params) throws JavaModelException {
         IMember member = member(project, params);
-        if (member == null) {
+        String markdown = member == null ? null : Javadoc.markdown(member);
+        if (markdown == null) {
             return JsonNull.INSTANCE;
         }
-        ISourceRange range = member.getJavadocRange();
-        ITypeRoot root = member.getTypeRoot();
-        String source = root == null ? null : root.getSource();
-        if (range == null || source == null) {
-            return JsonNull.INSTANCE;
-        }
-        String raw = source.substring(range.getOffset(), range.getOffset() + range.getLength());
         JsonObject result = new JsonObject();
-        result.addProperty("markdown", javadocToMarkdown(raw));
+        result.addProperty("markdown", markdown);
         return result;
-    }
-
-    static String javadocToMarkdown(String raw) {
-        String body = raw.replaceFirst("^/\\*\\*", "").replaceFirst("\\*/$", "");
-        StringBuilder text = new StringBuilder();
-        for (String line : body.split("\\R")) {
-            text.append(line.replaceFirst("^\\s*\\*\\s?", "")).append('\n');
-        }
-        String result = text.toString().trim();
-        Matcher matcher = INLINE_TAG.matcher(result);
-        StringBuilder replaced = new StringBuilder();
-        while (matcher.find()) {
-            String value = matcher.group(1) != null ? matcher.group(1) : matcher.group(2).replace('#', '.');
-            matcher.appendReplacement(replaced, Matcher.quoteReplacement("`" + value.trim() + "`"));
-        }
-        matcher.appendTail(replaced);
-        result = replaced.toString()
-                .replaceAll("(?i)<p>\\s*", "\n\n")
-                .replaceAll("(?i)</?(b|strong)>", "**")
-                .replaceAll("(?i)</?(i|em)>", "_")
-                .replaceAll("(?i)</?code>", "`")
-                .replaceAll("(?i)<li>", "\n- ")
-                .replaceAll("<[^>]+>", "")
-                .replaceAll("(?m)^@(param|return|throws|exception|see|since|deprecated)\\b", "\n**@$1**");
-        return result.trim();
     }
 
     private JsonElement findTypes(IJavaProject project, String prefix, int limit) throws JavaModelException {
@@ -686,24 +745,20 @@ final class JavaModelService {
         char[] packageName = dot < 0 ? null : prefix.substring(0, dot).toCharArray();
         char[] typeName = (dot < 0 ? prefix : prefix.substring(dot + 1)).toCharArray();
         IJavaSearchScope scope = SearchEngine.createJavaSearchScope(new IJavaElement[] {project});
-        try {
-            new SearchEngine().searchAllTypeNames(packageName, SearchPattern.R_PREFIX_MATCH, typeName,
-                    SearchPattern.R_PREFIX_MATCH | SearchPattern.R_CAMELCASE_MATCH, IJavaSearchConstants.TYPE, scope,
-                    new TypeNameMatchRequestor() {
-                        @Override
-                        public void acceptTypeNameMatch(TypeNameMatch match) {
-                            if (result.size() >= limit || !Flags.isPublic(match.getModifiers())) {
-                                return;
-                            }
-                            JsonObject type = new JsonObject();
-                            type.addProperty("fqn", match.getFullyQualifiedName().replace('$', '.'));
-                            type.addProperty("simpleName", match.getSimpleTypeName());
-                            result.add(type);
+        new SearchEngine().searchAllTypeNames(packageName, SearchPattern.R_PREFIX_MATCH, typeName,
+                SearchPattern.R_PREFIX_MATCH | SearchPattern.R_CAMELCASE_MATCH, IJavaSearchConstants.TYPE, scope,
+                new TypeNameMatchRequestor() {
+                    @Override
+                    public void acceptTypeNameMatch(TypeNameMatch match) {
+                        if (result.size() >= limit || !Flags.isPublic(match.getModifiers())) {
+                            return;
                         }
-                    }, IJavaSearchConstants.WAIT_UNTIL_READY_TO_SEARCH, null);
-        } catch (JavaModelException e) {
-            throw e;
-        }
+                        JsonObject type = new JsonObject();
+                        type.addProperty("fqn", match.getFullyQualifiedName().replace('$', '.'));
+                        type.addProperty("simpleName", match.getSimpleTypeName());
+                        result.add(type);
+                    }
+                }, IJavaSearchConstants.WAIT_UNTIL_READY_TO_SEARCH, null);
         return result;
     }
 }

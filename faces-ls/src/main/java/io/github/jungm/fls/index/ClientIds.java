@@ -9,6 +9,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import io.github.jungm.fls.analysis.FaceletsTags;
+import io.github.jungm.fls.el.ElRegion;
 import io.github.jungm.fls.features.ComponentModel;
 import io.github.jungm.fls.index.FaceletsIndex.Edge;
 import io.github.jungm.fls.index.FaceletsIndex.Entry;
@@ -46,9 +48,9 @@ public final class ClientIds {
     private ClientIds() {
     }
 
-    /** All stable client ids of a page, cached per index snapshot. */
+    /** All stable client ids of a page, cached per index snapshot and project. */
     public static List<ClientId> forPage(Snapshot snapshot, ComponentModel components, String pageUri) {
-        return snapshot.cached("clientIds:" + System.identityHashCode(components) + ":" + pageUri, () -> {
+        return snapshot.cached("clientIds:" + components.project().root() + ":" + pageUri, () -> {
             Entry page = snapshot.entry(pageUri);
             if (page == null) {
                 return List.of();
@@ -160,8 +162,8 @@ public final class ClientIds {
                 return;
             }
             XmlAttribute idAttribute = ComponentModel.idAttribute(element);
-            String id = idAttribute == null || idAttribute.value() == null ? null : idAttribute.value().trim();
-            boolean stableId = id != null && !id.isEmpty() && !id.contains("#{") && !id.contains("${");
+            String id = idAttribute == null ? null : ElRegion.literal(idAttribute.value());
+            boolean stableId = id != null;
             if (stable && stableId) {
                 result.add(new ClientId(join(prefix, id), separator, uri, idAttribute.valueStart(), idAttribute.valueEnd(),
                         element.name(), pageUri));
@@ -221,7 +223,7 @@ public final class ClientIds {
 
         private static void collectDefines(String uri, XmlElement element, Map<String, Define> result) {
             for (XmlElement child : element.children()) {
-                if (child.localName().equals("define") && Namespaces.FACELETS.equals(Namespaces.canonical(child.namespace()))) {
+                if (FaceletsTags.is(child, "define")) {
                     String name = child.attributeValue("name");
                     if (name != null) {
                         result.putIfAbsent(name, new Define(child, uri));

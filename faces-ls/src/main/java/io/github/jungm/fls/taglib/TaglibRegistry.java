@@ -2,26 +2,28 @@ package io.github.jungm.fls.taglib;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Enumeration;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import java.util.stream.Stream;
 
 import io.github.jungm.fls.project.LibraryFiles;
+import io.github.jungm.fls.project.LibraryJar;
+import io.github.jungm.fls.project.WebRoots;
 
 /**
  * Tag libraries for one project: the bundled standard libraries, {@code *.taglib.xml} files on the classpath and
- * in the web application, and composite component libraries from resource directories.
+ * in the web application, and composite component libraries from resource directories. What a library jar
+ * contributes is read once for all projects ({@link LibraryJar}).
  */
 public final class TaglibRegistry {
     private static final Logger LOG = Logger.getLogger(TaglibRegistry.class.getName());
@@ -31,9 +33,18 @@ public final class TaglibRegistry {
 
     private static final Map<String, TagLibrary> STANDARD = loadBundled();
 
-    private final Map<String, TagLibrary> libraries = new ConcurrentHashMap<>();
-    private final Map<String, TagLibrary> composites = new ConcurrentHashMap<>();
-    private volatile List<ResourceRoot> resourceRoots = List.of();
+    /**
+     * What the last {@link #refresh} found, replaced as a whole so that a concurrent reader sees either the previous
+     * or the new libraries. {@code composites} caches the composite libraries read from {@code resourceRoots}.
+     */
+    private record State(Map<String, TagLibrary> libraries, List<ResourceRoot> resourceRoots,
+                         Map<String, TagLibrary> composites) {
+        State withoutComposites() {
+            return new State(libraries, resourceRoots, new ConcurrentHashMap<>());
+        }
+    }
+
+    private volatile State state = new State(Map.of(), List.of(), new ConcurrentHashMap<>());
 
     /** A directory or jar containing {@code <library>/<component>.xhtml} composite components. */
     public record ResourceRoot(Path path, String jarPrefix) {
@@ -69,16 +80,16 @@ public final class TaglibRegistry {
      * @param taglibFiles  extra {@code *.taglib.xml} files (WEB-INF, FACELETS_LIBRARIES)
      * @param resourceRoots roots for composite component lookup
      */
-    public void refresh(List<Path> classpath, List<Path> taglibFiles, List<ResourceRoot> resourceRoots) {
+    public synchronized void refresh(List<Path> classpath, List<Path> taglibFiles, List<ResourceRoot> resourceRoots) {
         Map<String, TagLibrary> loaded = new LinkedHashMap<>();
         List<ResourceRoot> roots = new ArrayList<>(resourceRoots);
         for (Path entry : classpath) {
-            if (Files.isRegularFile(entry) && entry.toString().endsWith(".jar")) {
+            if (LibraryFiles.isJar(entry)) {
                 scanJar(entry, loaded, roots);
             } else if (Files.isDirectory(entry)) {
                 Path metaInf = entry.resolve("META-INF");
                 if (Files.isDirectory(metaInf)) {
-                    try (var files = Files.walk(metaInf, 3)) {
+                    try (Stream<Path> files = Files.walk(metaInf, 3)) {
                         files.filter(p -> p.getFileName().toString().endsWith(".taglib.xml"))
                                 .forEach(p -> loadFile(p, loaded));
                     } catch (IOException e) {
@@ -94,15 +105,12 @@ public final class TaglibRegistry {
         for (Path file : taglibFiles) {
             loadFile(file, loaded);
         }
-        libraries.clear();
-        libraries.putAll(loaded);
-        this.resourceRoots = List.copyOf(roots);
-        composites.clear();
+        state = new State(Collections.unmodifiableMap(loaded), List.copyOf(roots), new ConcurrentHashMap<>());
     }
 
     /** Drops cached composite libraries, e.g. after a component file changed. */
-    public void invalidateComposites() {
-        composites.clear();
+    public synchronized void invalidateComposites() {
+        state = state.withoutComposites();
     }
 
     private static void loadFile(Path file, Map<String, TagLibrary> into) {
@@ -117,31 +125,12 @@ public final class TaglibRegistry {
     }
 
     private static void scanJar(Path jar, Map<String, TagLibrary> into, List<ResourceRoot> roots) {
-        try (ZipFile zip = new ZipFile(jar.toFile())) {
-            boolean hasResources = false;
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
-                if (name.startsWith("META-INF/") && name.endsWith(".taglib.xml")) {
-                    try (InputStream input = zip.getInputStream(entry)) {
-                        TagLibrary library = TaglibXmlLoader.load(input, jar.getFileName() + "!/" + name,
-                                TaglibDescriptor.ofJarEntry(jar, name));
-                        if (library != null) {
-                            into.putIfAbsent(Namespaces.canonical(library.namespace()), library);
-                        }
-                    } catch (IOException | RuntimeException e) {
-                        LOG.log(Level.FINE, "cannot read " + name + " in " + jar, e);
-                    }
-                } else if (name.startsWith("META-INF/resources/") && name.endsWith(".xhtml")) {
-                    hasResources = true;
-                }
-            }
-            if (hasResources) {
-                roots.add(new ResourceRoot(jar, "META-INF/resources/"));
-            }
-        } catch (IOException e) {
-            LOG.log(Level.FINE, "cannot open " + jar, e);
+        LibraryJar library = LibraryJar.of(jar);
+        for (TagLibrary taglib : library.taglibs()) {
+            into.putIfAbsent(Namespaces.canonical(taglib.namespace()), taglib);
+        }
+        if (library.hasResources()) {
+            roots.add(new ResourceRoot(jar, LibraryJar.META_INF_RESOURCES));
         }
     }
 
@@ -150,25 +139,39 @@ public final class TaglibRegistry {
         if (uri == null) {
             return null;
         }
+        State current = state;
         String compositeLibrary = Namespaces.compositeLibrary(uri.trim());
         if (compositeLibrary != null) {
-            return composites.computeIfAbsent(compositeLibrary, name -> loadComposite(uri.trim(), name));
+            return cachedComposite(current, compositeLibrary, () -> loadComposite(current, uri.trim(), compositeLibrary));
         }
         String canonical = Namespaces.canonical(uri);
         TagLibrary standard = STANDARD.get(canonical);
         if (standard != null) {
             return standard;
         }
-        TagLibrary library = libraries.get(canonical);
+        TagLibrary library = current.libraries().get(canonical);
         if (library != null && library.compositeLibraryName() != null) {
-            return composites.computeIfAbsent("taglib:" + canonical, key -> withComposites(library));
+            return cachedComposite(current, "taglib:" + canonical, () -> withComposites(current, library));
         }
         return library;
     }
 
+    /** A composite library from the cache of {@code current}; it is read outside the map, so readers never wait. */
+    private static TagLibrary cachedComposite(State current, String key, Supplier<TagLibrary> load) {
+        TagLibrary cached = current.composites().get(key);
+        if (cached == null) {
+            TagLibrary loaded = load.get();
+            cached = current.composites().putIfAbsent(key, loaded);
+            if (cached == null) {
+                cached = loaded;
+            }
+        }
+        return cached;
+    }
+
     /** A taglib with {@code <composite-library-name>}: its own tags plus the composite components of that library. */
-    private TagLibrary withComposites(TagLibrary library) {
-        TagLibrary components = loadComposite(library.namespace(), library.compositeLibraryName());
+    private static TagLibrary withComposites(State current, TagLibrary library) {
+        TagLibrary components = loadComposite(current, library.namespace(), library.compositeLibraryName());
         return TagLibrary.builder(library.namespace(), library.source())
                 .description(library.description())
                 .descriptor(library.descriptor())
@@ -181,7 +184,7 @@ public final class TaglibRegistry {
     }
 
     public Collection<TagLibrary> projectLibraries() {
-        return libraries.values();
+        return state.libraries().values();
     }
 
     public static Collection<TagLibrary> standardLibraries() {
@@ -191,28 +194,19 @@ public final class TaglibRegistry {
     /** Names of composite libraries found in resource roots. */
     public List<String> compositeLibraryNames() {
         List<String> names = new ArrayList<>();
-        for (ResourceRoot root : resourceRoots) {
+        for (ResourceRoot root : state.resourceRoots()) {
             if (root.isJar()) {
-                try (ZipFile zip = new ZipFile(root.path().toFile())) {
-                    zip.stream().map(ZipEntry::getName)
-                            .filter(n -> n.startsWith(root.jarPrefix()) && n.endsWith(".xhtml"))
-                            .map(n -> n.substring(root.jarPrefix().length()))
-                            .filter(n -> n.indexOf('/') > 0)
-                            .map(n -> n.substring(0, n.lastIndexOf('/')))
-                            .distinct().forEach(n -> {
-                                if (!names.contains(n)) {
-                                    names.add(n);
-                                }
-                            });
-                } catch (IOException e) {
-                    LOG.log(Level.FINE, "cannot open " + root.path(), e);
+                for (String name : LibraryJar.of(root.path()).compositeLibraryNames()) {
+                    if (!names.contains(name)) {
+                        names.add(name);
+                    }
                 }
             } else if (Files.isDirectory(root.path())) {
-                try (var dirs = Files.walk(root.path(), 4)) {
+                try (Stream<Path> dirs = Files.walk(root.path(), 4)) {
                     dirs.filter(Files::isDirectory).filter(d -> !d.equals(root.path())).forEach(dir -> {
-                        try (var files = Files.list(dir)) {
+                        try (Stream<Path> files = Files.list(dir)) {
                             if (files.anyMatch(f -> f.getFileName().toString().endsWith(".xhtml"))) {
-                                String name = root.path().relativize(dir).toString().replace('\\', '/');
+                                String name = WebRoots.webPath(root.path().relativize(dir)).substring(1);
                                 if (!names.contains(name)) {
                                     names.add(name);
                                 }
@@ -229,35 +223,19 @@ public final class TaglibRegistry {
         return names;
     }
 
-    private TagLibrary loadComposite(String uri, String libraryName) {
+    private static TagLibrary loadComposite(State current, String uri, String libraryName) {
         TagLibrary.Builder builder = TagLibrary.builder(uri, "composite library '" + libraryName + "'").composite(true);
-        for (ResourceRoot root : resourceRoots) {
+        for (ResourceRoot root : current.resourceRoots()) {
             if (root.isJar()) {
-                String prefix = root.jarPrefix() + libraryName + "/";
-                try (ZipFile zip = new ZipFile(root.path().toFile())) {
-                    Enumeration<? extends ZipEntry> entries = zip.entries();
-                    while (entries.hasMoreElements()) {
-                        ZipEntry entry = entries.nextElement();
-                        String name = entry.getName();
-                        if (name.startsWith(prefix) && name.endsWith(".xhtml") && name.indexOf('/', prefix.length()) < 0) {
-                            String tagName = name.substring(prefix.length(), name.length() - ".xhtml".length());
-                            try (InputStream input = zip.getInputStream(entry)) {
-                                String text = new String(input.readAllBytes(), StandardCharsets.UTF_8);
-                                Path extracted = LibraryFiles.extract(root.path(), name);
-                                builder.tag(CompositeComponents.describe(tagName,
-                                        extracted == null ? null : extracted.toUri().toString(), text));
-                            }
-                        }
-                    }
-                } catch (IOException e) {
-                    LOG.log(Level.FINE, "cannot read composites in " + root.path(), e);
+                for (TagLibrary.TagDef tag : LibraryJar.of(root.path()).compositeComponents(libraryName)) {
+                    builder.tag(tag);
                 }
             } else {
                 Path dir = root.path().resolve(libraryName);
                 if (!Files.isDirectory(dir)) {
                     continue;
                 }
-                try (var files = Files.list(dir)) {
+                try (Stream<Path> files = Files.list(dir)) {
                     for (Path file : (Iterable<Path>) files::iterator) {
                         String fileName = file.getFileName().toString();
                         if (!fileName.endsWith(".xhtml")) {

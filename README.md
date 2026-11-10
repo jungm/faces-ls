@@ -28,8 +28,8 @@ jdtls. It works with any LSP client.
   `META-INF/resources`, plus library jars) follows composite components, `ui:include` and templates. Incoming
   calls in the call hierarchy show who uses a composite, include or template, level by level up to the pages;
   find references lists all usages; a code lens shows "used in N files · M pages".
-- **Facelets callers of Java members**: the call hierarchy of a Java method, getter, setter or constant (through
-  jdtls and faces-jdt) lists the `.xhtml` files whose EL uses it next to the Java callers.
+- **Facelets usages of Java members**: find references and the call hierarchy of a Java method, getter, setter or
+  constant (through jdtls and faces-jdt) list the `.xhtml` files whose EL uses it next to the Java usages.
 - **Client ids across files**: pages are expanded through templates, includes and composites, so `update`,
   `process`, ... complete absolute client ids such as `:mainForm:angaben:person:street` of every page the current
   file ends up in, and go to definition / hover resolve them into the file that declares the component. Ids below
@@ -38,14 +38,16 @@ jdtls. It works with any LSP client.
 - **Diagnostics**: unknown tags and attributes, missing required attributes, undeclared prefixes, unknown tag
   libraries, EL syntax errors, unresolved variables, properties, methods, functions, bundle keys and composite
   attributes.
-- **Code actions**: declare missing namespaces (quick fix, or `source.addMissingImports` for the whole file).
+- **Code actions**: declare an undeclared prefix that is predefined in the `namespaces` setting (quick fix, or
+  `source.addMissingImports` for the whole file); add missing required attributes (quick fix).
 - **Semantic tokens**: EL names are classified by what they resolve to (CDI beans, tag variables, implicit objects,
-  lambda parameters, properties, methods), deprecated members are marked, and composite component tags and
-  component ids with the search expressions that reference them are marked too.
+  lambda parameters, properties, methods), deprecated members are marked, and tag prefixes, composite component
+  tags and component ids with the search expressions that reference them are marked too.
 
 Beans, composite components, tag libraries, faces-config.xml files and resource bundles are picked up from the
-project, from other modules of a multi-module build and from library jars. Navigation into a jar opens a read-only
-extracted copy (Java classes need a sources jar, e.g. `-sources.jar` next to the jar in `~/.m2`).
+project, from other modules of a multi-module build and from library jars; modules and jars come from jdtls'
+classpath. Navigation into a jar opens a read-only extracted copy (Java classes need attached sources, e.g. a
+`-sources.jar` next to the jar in `~/.m2`).
 
 ## How it works
 
@@ -53,8 +55,8 @@ See [docs/architecture.md](docs/architecture.md). In short:
 
 - `faces-ls/` is the language server (Java 21, lsp4j).
 - `faces-jdt/` is an OSGi bundle running inside jdtls. It answers Java model queries over a loopback socket
-  announced in a rendezvous file next to its jar. Without jdtls everything except the Java-backed EL features
-  still works.
+  announced in a rendezvous file next to its jar. Without jdtls, tags, attributes, project composite components,
+  project resource bundles, ids and paths still work; beans, Java types and everything from library jars do not.
 - `faces-ls-dist/` builds `faces-ls-<version>.zip` with launchers and both jars, for LSP clients without an
   extension of their own.
 - `vscode/` is the VS Code extension, which bundles both jars.
@@ -81,10 +83,14 @@ See [vscode/README.md](vscode/README.md#development) for more.
 ## Testing
 
 ```sh
-mvn test
-scripts/test-nvim.sh                                     # the distribution in a headless Neovim against samples/multi
-scripts/lsp-client.py FILE hover LINE CHARACTER          # single requests to faces-ls
+mvn verify
+scripts/test-nvim.sh                                     # after mvn package: the distribution in a headless Neovim against samples/multi/web
+scripts/lsp-client.py FILE hover LINE CHARACTER          # single requests (completion, hover, definition) to faces-ls
 ```
+
+`scripts/test-nvim.sh` needs Neovim 0.11+ and a jdtls install (`JDTLS`, default: Mason's). It runs faces-ls and
+jdtls with `FACES_TEST_JAVA_HOME` (default: SDKMAN's current Java), which has to be the version that jdtls needs:
+current jdtls releases need Java 25. See [docs/architecture.md](docs/architecture.md#testing).
 
 `samples/demo` is a small project to try, `samples/multi` a multi-module one (`web` uses beans, composites and a
 bundle from `shared`, and PrimeFaces).

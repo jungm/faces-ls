@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import io.github.jungm.fls.Threads;
 import io.github.jungm.fls.analysis.ElAnalyzer;
 import io.github.jungm.fls.index.ClientIds;
 import io.github.jungm.fls.index.FaceletsIndex;
@@ -25,11 +26,7 @@ final class ClientIdLookup {
 
     private static final Map<String, Cached> CACHE = new ConcurrentHashMap<>();
     private static final Set<String> REFRESHING = ConcurrentHashMap.newKeySet();
-    private static final ExecutorService REFRESH = Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "faces-ls-client-ids");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private static final ExecutorService REFRESH = Executors.newSingleThreadExecutor(Threads.daemon("faces-ls-client-ids"));
 
     /**
      * Distinct client ids with their occurrences, or empty while the index is not built. Every edit creates a new
@@ -49,19 +46,24 @@ final class ClientIdLookup {
         ComponentModel components = new ComponentModel(analyzer.project());
         if (cached == null) {
             Map<String, List<ClientIds.ClientId>> computed = ClientIds.forFile(snapshot, components, uri);
-            CACHE.put(uri, new Cached(snapshot.version(), computed));
+            store(uri, new Cached(snapshot.version(), computed));
             return computed;
         }
         if (REFRESHING.add(uri)) {
             REFRESH.execute(() -> {
                 try {
-                    CACHE.put(uri, new Cached(snapshot.version(), ClientIds.forFile(snapshot, components, uri)));
+                    store(uri, new Cached(snapshot.version(), ClientIds.forFile(snapshot, components, uri)));
                 } finally {
                     REFRESHING.remove(uri);
                 }
             });
         }
         return cached.clientIds();
+    }
+
+    /** Keeps the result of the newest snapshot when computations for several snapshots finish out of order. */
+    private static void store(String uri, Cached computed) {
+        CACHE.merge(uri, computed, (previous, next) -> next.version() >= previous.version() ? next : previous);
     }
 
     /** Components with exactly this client id (without leading separator), one per declaring location. */

@@ -2,6 +2,7 @@ package io.github.jungm.fls.features;
 
 import io.github.jungm.fls.analysis.FacesDocument;
 import io.github.jungm.fls.xml.XmlAttribute;
+import io.github.jungm.fls.xml.XmlDocument;
 import io.github.jungm.fls.xml.XmlElement;
 
 /**
@@ -15,17 +16,13 @@ public record Cursor(Kind kind, XmlElement element, XmlAttribute attribute, int 
         TAG_NAME, CLOSE_TAG_NAME, ATTRIBUTE_NAME, ATTRIBUTE_VALUE, TEXT, NONE
     }
 
-    static boolean isNameChar(char c) {
-        return Character.isLetterOrDigit(c) || c == ':' || c == '_' || c == '-' || c == '.';
-    }
-
     public static Cursor at(FacesDocument document, int offset) {
         String text = document.text();
         if (document.xml().inComment(offset)) {
             return new Cursor(Kind.NONE, null, null, offset, "");
         }
         int wordStart = offset;
-        while (wordStart > 0 && isNameChar(text.charAt(wordStart - 1))) {
+        while (wordStart > 0 && XmlDocument.isNameChar(text.charAt(wordStart - 1))) {
             wordStart--;
         }
         String word = text.substring(wordStart, offset);
