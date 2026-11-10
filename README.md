@@ -1,102 +1,39 @@
 # Faces Language Server
 
-A language server for Jakarta® Faces: Facelets pages (`*.xhtml`), Expression Language and Java integration through
-jdtls. It works with any LSP client.
+A language server for Jakarta® Faces: Facelets pages (`*.xhtml`), Expression Language and their Java backing code.
 
-Facelets is the only view declaration language it supports, by design. Faces lets applications plug in other view
-declaration languages (JSP was one until Faces 4.0), but pages written in them get no support.
+- **Standalone LSP server.** It speaks plain LSP over stdio, so it works with any LSP client: Neovim, Helix, Emacs,
+  Sublime Text and others (setup in [docs/editors.md](docs/editors.md)). The main consumer is VS Code, through the
+  extension in [vscode/](vscode).
+- **Tag libraries are discovered, not bundled.** Tags, attributes and composite components are read from the
+  project and its classpath: every `*.taglib.xml`, composite component and `faces-config.xml` in your modules and
+  jars. PrimeFaces, OmniFaces or your in-house libraries? They all get the same first-class support at any version.
+- **Built for Faces 4.** The standard tags (`h`, `f`, `ui`, ...) are those of Faces 4.1. Older `javax.faces`
+  projects and their `xmlns.jcp.org` / `java.sun.com` namespaces work too, but are offered the 4.1 tag set.
 
-- VS Code: the extension in [vscode/](vscode)
-- Neovim, Helix and other LSP clients: see [docs/editors.md](docs/editors.md)
+Java types, beans and the classpath come from jdtls, which loads a small bundle (`faces-jdt`) from this project.
+Facelets is the only supported view declaration language.
 
 ## Features
 
-- **Completion**
-  - tags of every declared library and of composite component libraries; standard libraries that are not
-    declared yet are offered too, and completing one adds its `xmlns` declaration
-  - attributes, with required ones first
-  - attribute values: namespace URIs, template/include paths, component ids for `for`/`render`/`execute`,
-    `f:ajax` events, class names for `type` attributes
-  - EL: implicit objects, CDI `@Named` beans, managed beans, resource bundle variables, tag variables (`var`,
-    `varStatus`, `ui:param`, `c:set`, `f:importConstants`, `p:importEnum` and the like), lambda parameters, `cc`/`cc.attrs`, bean properties and
-    methods (with generics, e.g. `List<User>` iteration), resource bundle keys, taglib functions
-- **Hover**: tag and attribute documentation, EL types with Javadoc, bundle values.
-- **Go to definition**: EL beans, properties and methods to Java source; bundle keys to `.properties`; composite tags
-  and attributes to the component file; `template`/`src` paths; `ui:define` to the matching `ui:insert`; ids.
-- **Component search expressions** in `update`, `process`, `render`, `execute`, `for` (and PrimeFaces' `appendTo`,
-  `target`, ...): go to definition and hover resolve `@this`, `@parent`, `@form`, `@namingcontainer`, `@composite`,
-  `@child(n)`, `@next`, `@previous`, `@root`, `@id(..)`, `@widgetVar(..)`, relative and absolute ids and chains like
-  `@form:@child(0)` against the page's component tree; completion offers keywords, ids and widgetVar names.
-- **Where a file is used**: a workspace-wide index of all Facelets files (every module's web root and
-  `META-INF/resources`, plus library jars) follows composite components, `ui:include` and templates. Incoming
-  calls in the call hierarchy show who uses a composite, include or template, level by level up to the pages;
-  find references lists all usages; a code lens shows "used in N files · M pages".
-- **Facelets usages of Java members**: find references and the call hierarchy of a Java method, getter, setter or
-  constant (through jdtls and faces-jdt) list the `.xhtml` files whose EL uses it next to the Java usages.
-- **Client ids across files**: pages are expanded through templates, includes and composites, so `update`,
-  `process`, ... complete absolute client ids such as `:mainForm:angaben:person:street` of every page the current
-  file ends up in, and go to definition / hover resolve them into the file that declares the component. Ids below
-  naming containers without (or with EL) ids and inside iterating components are left out, as their client ids
-  are generated or per row.
-- **Diagnostics**: unknown tags and attributes, missing required attributes, undeclared prefixes, unknown tag
-  libraries, EL syntax errors, unresolved variables, properties, methods, functions, bundle keys and composite
-  attributes.
-- **Code actions**: declare an undeclared prefix that is predefined in the `namespaces` setting (quick fix, or
-  `source.addMissingImports` for the whole file); add missing required attributes (quick fix).
-- **Semantic tokens**: EL names are classified by what they resolve to (CDI beans, tag variables, implicit objects,
-  lambda parameters, properties, methods), deprecated members are marked, and tag prefixes, composite component
-  tags and component ids with the search expressions that reference them are marked too.
+- Completion, hover and go to definition for tags, attributes, EL (beans, properties, methods, bundle keys,
+  tag variables), template and include paths, component ids and search expressions (`@form`, `@parent`, ...)
+- Client ids across files: pages are expanded through templates, includes and composites
+- Diagnostics for unknown tags and attributes, missing required attributes, EL errors and unresolved names
+- Find references and call hierarchy for composites, includes and templates, and Facelets usages of Java members
+- Code actions to declare namespaces and add required attributes; semantic tokens for EL
 
-Beans, composite components, tag libraries, faces-config.xml files and resource bundles are picked up from the
-project, from other modules of a multi-module build and from library jars; modules and jars come from jdtls'
-classpath. Navigation into a jar opens a read-only extracted copy (Java classes need attached sources, e.g. a
-`-sources.jar` next to the jar in `~/.m2`).
+## Building and testing
 
-## How it works
-
-See [docs/architecture.md](docs/architecture.md). In short:
-
-- `faces-ls/` is the language server (Java 21, lsp4j).
-- `faces-jdt/` is an OSGi bundle running inside jdtls. It answers Java model queries over a loopback socket
-  announced in a rendezvous file next to its jar. Without jdtls, tags, attributes, project composite components,
-  project resource bundles, ids and paths still work; beans, Java types and everything from library jars do not.
-- `faces-ls-dist/` builds `faces-ls-<version>.zip` with launchers and both jars, for LSP clients without an
-  extension of their own.
-- `vscode/` is the VS Code extension, which bundles both jars.
-
-## Building
-
-Requirements: JDK 21+, Maven.
+Requires JDK 21+ and Maven.
 
 ```sh
-mvn package     # faces-ls/target/faces-ls.jar, faces-jdt/target/faces-jdt.jar, faces-ls-dist/target/faces-ls-<version>.zip
-```
-
-The VS Code extension (Node.js 20+), after `mvn package`:
-
-```sh
-cd vscode
-npm install
-npm run server      # copies faces-ls.jar and faces-jdt.jar into vscode/server/
-npm run package     # vscode/faces-<version>.vsix
-```
-
-See [vscode/README.md](vscode/README.md#development) for more.
-
-## Testing
-
-```sh
+mvn package   # faces-ls.jar, faces-jdt.jar and faces-ls-dist/target/faces-ls-<version>.zip
 mvn verify
-scripts/test-nvim.sh                                     # after mvn package: the distribution in a headless Neovim against samples/multi/web
-scripts/lsp-client.py FILE hover LINE CHARACTER          # single requests (completion, hover, definition) to faces-ls
 ```
 
-`scripts/test-nvim.sh` needs Neovim 0.11+ and a jdtls install (`JDTLS`, default: Mason's). It runs faces-ls and
-jdtls with `FACES_TEST_JAVA_HOME` (default: SDKMAN's current Java), which has to be the version that jdtls needs:
-current jdtls releases need Java 25. See [docs/architecture.md](docs/architecture.md#testing).
-
-`samples/demo` is a small project to try, `samples/multi` a multi-module one (`web` uses beans, composites and a
-bundle from `shared`, and PrimeFaces).
+The VS Code extension is built in [vscode/](vscode/README.md#development). The structure of the code is described in
+[docs/architecture.md](docs/architecture.md), sample projects are in `samples/`.
 
 ## License
 
