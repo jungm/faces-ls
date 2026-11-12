@@ -1,8 +1,10 @@
 # Faces Language Server
 
 A language server for Jakarta® Faces: Facelets pages (`*.xhtml`), Expression Language and their Java backing code.
-VS Code users install the [extension](https://marketplace.visualstudio.com/items?itemName=jungm.faces); other
-editors talk to the server over stdio ([setup](docs/editors.md)).
+For VS Code, install the extension from the
+[Marketplace](https://marketplace.visualstudio.com/items?itemName=jungm.faces) or
+[Open VSX](https://open-vsx.org/extension/jungm/faces) (VSCodium, Cursor and others); other editors talk to the
+server over stdio ([setup](docs/editors.md)).
 
 Tags are read from the project and its classpath (`*.taglib.xml`, composite components, `faces-config.xml`), so any
 component library works. Only the Faces 4.1 standard tags are built in; `javax.faces` projects work too, but get the
