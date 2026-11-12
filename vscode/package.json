@@ -1,10 +1,11 @@
 {
   "name": "faces",
-  "displayName": "Faces for Jakarta\u00ae EE",
-  "description": "Support for Jakarta\u00ae Faces: Facelets pages, Expression Language and Java integration, powered by the Faces Language Server.",
-  "version": "0.1.0",
+  "displayName": "Faces for Jakarta® EE",
+  "description": "Support for Jakarta® Faces: Facelets pages, Expression Language and Java integration, powered by the Faces Language Server.",
+  "version": "0.1.1",
   "publisher": "jungm",
   "license": "Apache-2.0",
+  "icon": "images/icon.png",
   "author": {
     "name": "Markus Jung",
     "email": "jungm@apache.org"
