@@ -29,9 +29,21 @@
   "keywords": [
     "facelets",
     "faces",
+    "jakarta faces",
+    "jsf",
+    "javaserver faces",
     "jakarta ee",
+    "java ee",
+    "jakarta",
     "expression language",
-    "xhtml"
+    "el",
+    "xhtml",
+    "primefaces",
+    "omnifaces",
+    "mojarra",
+    "myfaces",
+    "cdi",
+    "language server"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
