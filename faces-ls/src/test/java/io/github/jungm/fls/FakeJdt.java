@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -202,7 +203,8 @@ final class FakeJdt implements AutoCloseable {
                         .create();
                 clients.add(launcher.getRemoteProxy());
                 launcher.startListening();
-            } catch (IOException e) {
+            } catch (IOException | RejectedExecutionException e) {
+                // closed, possibly while a connection was being accepted
                 return;
             }
         }

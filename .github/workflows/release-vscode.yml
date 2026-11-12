@@ -34,13 +34,13 @@ jobs:
     outputs:
       version: ${{ steps.bump.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -70,7 +70,7 @@ jobs:
           git tag -a "vscode-$VERSION" -m "VS Code extension $VERSION"
           git push --atomic origin HEAD:main "vscode-$VERSION"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vsix
           path: vscode/faces-${{ steps.bump.outputs.version }}.vsix
@@ -86,17 +86,17 @@ jobs:
     env:
       VSIX: faces-${{ needs.release.outputs.version }}.vsix
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: vscode-${{ needs.release.outputs.version }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: vscode/package-lock.json
       - run: npm ci
         working-directory: vscode
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: vsix
           path: vscode
