@@ -224,6 +224,16 @@ class JdtServerTest {
         assertTrue(beans2.get(5, TimeUnit.SECONDS).isJsonArray());
     }
 
+    @Test
+    void nothingIsLoggedOnceClosed() throws Exception {
+        authenticated();
+        Path log = dir.resolve("jdtls-" + ProcessHandle.current().pid() + ".log");
+        server.close();
+        String closed = Files.readString(log);
+        Thread.sleep(200);
+        assertEquals(closed, Files.readString(log));
+    }
+
     private void awaitEvents(int count) throws InterruptedException {
         for (int i = 0; i < 100 && events.size() < count; i++) {
             Thread.sleep(20);

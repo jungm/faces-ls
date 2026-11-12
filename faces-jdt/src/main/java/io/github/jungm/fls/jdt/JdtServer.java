@@ -22,6 +22,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.eclipse.lsp4j.jsonrpc.Launcher;
 import org.eclipse.lsp4j.jsonrpc.ResponseErrorException;
@@ -102,12 +103,25 @@ final class JdtServer {
             // shutting down
         }
         connectionThreads.shutdownNow();
+        awaitTermination(quick, searches, connectionThreads);
         try {
             if (rendezvousFile != null) {
                 Files.deleteIfExists(rendezvousFile);
             }
         } catch (IOException ignored) {
             // shutting down
+        }
+    }
+
+    /** Waits briefly for the threads to end, so none writes to the log once {@link #close} returns. */
+    private static void awaitTermination(ExecutorService... pools) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        try {
+            for (ExecutorService pool : pools) {
+                pool.awaitTermination(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
