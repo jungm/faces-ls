@@ -2,7 +2,7 @@
   "name": "faces",
   "displayName": "Faces for Jakarta® EE",
   "description": "Support for Jakarta® Faces: Facelets pages, Expression Language and Java integration, powered by the Faces Language Server.",
-  "version": "0.1.2",
+  "version": "0.1.3-dev",
   "publisher": "jungm",
   "license": "Apache-2.0",
   "icon": "images/icon.png",
