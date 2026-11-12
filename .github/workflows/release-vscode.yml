@@ -1,0 +1,111 @@
+# Releases the VS Code extension: bumps the version in vscode/package.json, commits and tags it (vscode-<version>),
+# then publishes the .vsix to the VS Code Marketplace and Open VSX with trusted publishing (OIDC, no stored tokens).
+#
+# Both registries trust this workflow by its file name (release-vscode.yml) and the "release" environment, see
+# Trusted Publishing on https://marketplace.visualstudio.com/manage/publishers/jungm and
+# https://open-vsx.org/user-settings/trusted-publishers.
+#
+# A failed publish job can be re-run on its own ("Re-run failed jobs"): it publishes the .vsix built by the release job
+# and skips a registry that already has the version.
+name: Release VS Code extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release-vscode
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - run: mvn -B verify
+
+      - id: bump
+        working-directory: vscode
+        run: |
+          npm ci
+          version=$(npm version "${{ inputs.bump }}" --no-git-tag-version)
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+
+      - working-directory: vscode
+        run: |
+          npm run server
+          npx vsce package --out "faces-${{ steps.bump.outputs.version }}.vsix"
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "Release VS Code extension $VERSION" vscode/package.json vscode/package-lock.json
+          git tag -a "vscode-$VERSION" -m "VS Code extension $VERSION"
+          git push --atomic origin HEAD:main "vscode-$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: vscode/faces-${{ steps.bump.outputs.version }}.vsix
+          if-no-files-found: error
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VSIX: faces-${{ needs.release.outputs.version }}.vsix
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: vscode-${{ needs.release.outputs.version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+      - run: npm ci
+        working-directory: vscode
+      - uses: actions/download-artifact@v4
+        with:
+          name: vsix
+          path: vscode
+
+      - name: Publish to the VS Code Marketplace
+        working-directory: vscode
+        run: npx vsce publish --oidc --packagePath "$VSIX" --skip-duplicate
+
+      - name: Publish to Open VSX
+        if: ${{ !cancelled() }}
+        working-directory: vscode
+        run: npx --yes ovsx@1.4.0 publish "$VSIX" --trusted-publishing --skip-duplicate
