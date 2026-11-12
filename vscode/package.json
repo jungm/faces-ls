@@ -11,11 +11,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jungm/faces-support",
+    "url": "https://github.com/jungm/faces-ls",
     "directory": "vscode"
   },
   "bugs": {
-    "url": "https://github.com/jungm/faces-support/issues"
+    "url": "https://github.com/jungm/faces-ls/issues"
   },
   "engines": {
     "vscode": "^1.105.0"

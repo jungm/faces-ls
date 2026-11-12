@@ -1,7 +1,7 @@
 # Faces for Jakarta® EE
 
 Jakarta® Faces support for Visual Studio Code: Facelets pages (`*.xhtml`), Expression Language and Java
-integration, powered by the [Faces Language Server](https://github.com/jungm/faces-support).
+integration, powered by the [Faces Language Server](https://github.com/jungm/faces-ls).
 
 Facelets is the only view declaration language it supports, by design. Pages written in other view declaration
 languages, such as JSP, get no support.
