@@ -27,6 +27,7 @@ import io.github.jungm.fls.index.FaceletsIndex;
 import io.github.jungm.fls.index.ViewPaths;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
+import io.github.jungm.fls.project.Resources;
 import io.github.jungm.fls.taglib.Namespaces;
 import io.github.jungm.fls.taglib.TagLibrary;
 import io.github.jungm.fls.taglib.TaglibDescriptor;
@@ -54,13 +55,25 @@ public final class DefinitionProvider {
         List<Location> result = new ArrayList<>();
         ElSite site = document.elAt(offset);
         if (site != null) {
-            Location location = elDefinition(site, offset);
+            ElLookup.Hit hit = ElLookup.find(analyzer, site, offset);
+            if (isResourceKey(hit)) {
+                result.addAll(resourceKey(hit.name()));
+                return result;
+            }
+            Location location = elDefinition(site, hit);
             if (location != null) {
                 result.add(location);
             }
             return result;
         }
         Cursor cursor = Cursor.on(document, offset);
+        if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE) {
+            List<Location> resources = resourceAttribute(cursor.element(), cursor.attribute(), offset);
+            if (resources != null) {
+                result.addAll(resources);
+                return result;
+            }
+        }
         if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE
                 && SearchExpressions.isSearchAttribute(cursor.element(),
                         PassthroughElements.componentAttributeName(cursor.element(), cursor.attribute()))) {
@@ -86,8 +99,7 @@ public final class DefinitionProvider {
 
     // ---------------------------------------------------------------- EL
 
-    private Location elDefinition(ElSite site, int offset) {
-        ElLookup.Hit hit = ElLookup.find(analyzer, site, offset);
+    private Location elDefinition(ElSite site, ElLookup.Hit hit) {
         if (hit == null) {
             return null;
         }
@@ -197,6 +209,96 @@ public final class DefinitionProvider {
 
     private static Location fileStart(Path file) {
         return new Location(file.toUri().toString(), new Range(new Position(0, 0), new Position(0, 0)));
+    }
+
+    // ---------------------------------------------------------------- resources
+
+    /**
+     * A string key on a {@code ResourceHandler}, as in {@code #{resource['library:name']}}: the ELResolver for
+     * resources answers such keys whatever expression yields the handler.
+     */
+    private boolean isResourceKey(ElLookup.Hit hit) {
+        return hit != null && hit.kind() == ElLookup.Kind.KEY && hit.base() instanceof ElType.Java java
+                && analyzer.isResourceHandler(java.type());
+    }
+
+    /** The files of {@code #{resource['library:name']}}, where the library {@code this} is the current file's. */
+    private List<Location> resourceKey(String key) {
+        Resources.Reference reference = Resources.Reference.parse(key);
+        if (reference == null) {
+            return List.of();
+        }
+        List<Path> files = "this".equals(reference.library())
+                ? Resources.findFromThis(analyzer.project(), documentPath(), reference.name())
+                : Resources.find(analyzer.project(), reference.library(), reference.name());
+        return files.stream().map(DefinitionProvider::fileStart).toList();
+    }
+
+    /**
+     * Attribute values that denote resources: {@code name} and {@code library} of a tag that takes both
+     * ({@code h:graphicImage}, {@code h:outputScript}, {@code h:outputStylesheet}, and the like of component
+     * libraries, also as {@code jsf:} attributes of passthrough elements), the URL of {@code h:graphicImage}, and the
+     * contracts of {@code f:view}. Null for other attributes.
+     */
+    private List<Location> resourceAttribute(XmlElement element, XmlAttribute attribute, int offset) {
+        String value = ElRegion.literal(attribute.value());
+        String name = PassthroughElements.componentAttributeName(element, attribute);
+        Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
+        if (value == null || resolved.tag() == null || resolved.attribute(element, attribute) == null) {
+            return null;
+        }
+        if ((name.equals("name") || name.equals("library"))
+                && resolved.tag().attribute("name") != null && resolved.tag().attribute("library") != null) {
+            String resourceName = name.equals("name") ? value : ElRegion.literal(componentAttributeValue(element, "name"));
+            String library = name.equals("library") ? value : componentAttributeValue(element, "library");
+            if (resourceName == null || library != null && ElRegion.literal(library) == null) {
+                return List.of();
+            }
+            return Resources.find(analyzer.project(), library == null ? null : library.trim(), resourceName).stream()
+                    .map(DefinitionProvider::fileStart).toList();
+        }
+        String namespace = Namespaces.canonical(resolved.namespace());
+        if (resolved.passthrough() == null && Namespaces.HTML.equals(namespace)
+                && element.localName().equals("graphicImage") && (name.equals("value") || name.equals("url"))) {
+            Path image = resolveView(value);
+            return image == null ? List.of() : List.of(fileStart(image));
+        }
+        if (Namespaces.CORE.equals(namespace) && element.localName().equals("view") && name.equals("contracts")) {
+            String contract = listItemAt(attribute, offset);
+            return contract == null ? List.of() : Resources.contract(analyzer.project(), contract).stream()
+                    .map(DefinitionProvider::fileStart).toList();
+        }
+        return null;
+    }
+
+    /** The value of the attribute that has the given name on the component (a {@code jsf:} one on passthrough elements). */
+    private static String componentAttributeValue(XmlElement element, String componentName) {
+        boolean passthrough = PassthroughElements.isPassthroughElement(element);
+        for (XmlAttribute candidate : element.attributes()) {
+            if ((!passthrough || PassthroughElements.isFacesAttribute(element, candidate))
+                    && PassthroughElements.componentAttributeName(element, candidate).equals(componentName)) {
+                return candidate.value();
+            }
+        }
+        return null;
+    }
+
+    /** The item of a comma separated attribute value under the offset, trimmed, or null. */
+    private static String listItemAt(XmlAttribute attribute, int offset) {
+        String value = attribute.value();
+        int position = Math.max(0, Math.min(value.length(), offset - attribute.valueStart()));
+        int start = value.lastIndexOf(',', position - 1) + 1;
+        int end = value.indexOf(',', position);
+        String item = value.substring(start, end < 0 ? value.length() : end).trim();
+        return item.isEmpty() ? null : item;
+    }
+
+    private Path documentPath() {
+        try {
+            return Path.of(URI.create(document.uri()));
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     // ---------------------------------------------------------------- markup

@@ -344,6 +344,19 @@ public final class ElAnalyzer {
     }
 
     /**
+     * Whether the type is a Faces {@code ResourceHandler}: the ELResolver for resources answers its names and keys
+     * ({@code #{resource['library:name']}}) with the URL of a resource.
+     */
+    public boolean isResourceHandler(JType type) {
+        for (String handler : List.of("jakarta.faces.application.ResourceHandler", "javax.faces.application.ResourceHandler")) {
+            if (type.name().equals(handler) || types().info(type.name()) != null && types().isSubtype(type, handler)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Evaluates the static type of a node. When {@code problems} is not null, unresolved names are added to it.
      */
     public ElType eval(ElNode node, Map<String, ElVariable> scope, List<Problem> problems) {
@@ -540,6 +553,10 @@ public final class ElAnalyzer {
                     List<TypeService.MethodInfo> methods = members.methods(name);
                     if (!methods.isEmpty()) {
                         return new ElType.MethodReference(methods.get(0), type);
+                    }
+                    if (isResourceHandler(type)) {
+                        // the ELResolver for resources answers any name with the URL of the resource
+                        return ElType.java("java.lang.String");
                     }
                     problem("Cannot resolve property or method '" + name + "' in " + type.display(), start, end, Severity.WARNING);
                     return ElType.UNKNOWN;

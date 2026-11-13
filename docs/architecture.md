@@ -71,6 +71,16 @@ source folders and the classpath is empty.
   attributes are passed through to the markup, so the component id is `jsf:id` only. `jsf:element` additionally
   takes `id`, `rendered` and `binding`, which its taglib leaves out. Where Mojarra and MyFaces differ, the
   specification and MyFaces decide (`<input type="button">` is `h:commandButton`).
+- **Resources** (`project/Resources.java`): go to definition on what the `ResourceHandler` serves: `name` and
+  `library` of tags that take both (`h:graphicImage`, `h:outputScript`, `h:outputStylesheet`, and the like of
+  component libraries, also as `jsf:` attributes of `<img>`, `<script>` and `<link>`), string keys on a
+  `ResourceHandler` such as `#{resource['library:name']}` (`this` is the library of the current composite or the
+  contract of the current template), the URL in `value`/`url` of `h:graphicImage`, and the contracts of `f:view
+  contracts` (their top-level templates, else the marker file). Resources are looked up as the specification packages
+  them: `resources/` of web roots (or `WEBAPP_RESOURCES_DIRECTORY`), `META-INF/resources/` of source folders,
+  classpath directories and jars (extracted), then the same inside every resource library contract (`contracts/`,
+  `WEBAPP_CONTRACTS_DIRECTORY`, `META-INF/contracts/`). The highest library and resource version wins; resources
+  are looked up without a locale prefix first, then below each directory named like a locale.
 - **Project configuration**: `WEB-INF/faces-config.xml` of web roots, `META-INF/*faces-config.xml` of source
   folders, classpath directories and jars (resource bundles and `<managed-bean>` entries), web.xml context params.
 - **Web roots** (`project/WebRoots.java`): `src/main/webapp`, `WebContent`, `web`, `webapp` and
@@ -218,6 +228,9 @@ Ideas that the code does not contain:
   unverified. faces-ls has no `rename` provider.
 - **Find references from Java into `.xhtml`**: faces-ls answers `references` for Facelets documents only. A client
   could merge faces-ls' answer for Java positions into jdtls' (VS Code merges references of all providers).
+- **Resources beyond go to definition**: completion of `library` and `name`, diagnostics for missing resources,
+  `#{resource[...]}` in CSS resources (faces-ls serves Facelets documents only), `@ResourceDependency` in Java, and
+  `WEBAPP_RESOURCES_DIRECTORY` for composite component discovery (which still assumes `resources/`).
 - **signatureHelp, documentLink**, and code actions to create a property or method, create a composite component
   or attribute, or extract a composite component.
 - **A standalone Java model** in faces-ls (classpath from Maven/Gradle, bytecode through ASM, sources through

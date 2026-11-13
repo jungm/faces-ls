@@ -4,9 +4,12 @@
       xmlns:ui="jakarta.faces.facelets">
 <h:head>
     <title>#{appSettings.title}</title>
+    <h:outputStylesheet library="css" name="layout.css"/>
+    <link rel="icon" href="#{resource['images:logo.svg']}"/>
 </h:head>
 <h:body>
     <header>
+        <h:graphicImage library="images" name="logo.svg" alt="#{appSettings.title}"/>
         <ui:insert name="header">#{msg['welcome.title']}</ui:insert>
     </header>
     <main>
