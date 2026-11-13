@@ -402,6 +402,14 @@ public final class DefinitionProvider {
                     ? new Location(document.uri(), document.lines().range(id.valueStart(), id.valueEnd()))
                     : new Location(document.uri(), document.lines().range(target.nameStart(), target.nameEnd())));
         }
+        if (locations.isEmpty()) {
+            // the form or naming container is outside this file: in a template, an including file or around a composite
+            for (ClientIdLookup.Target target : ClientIdLookup.relative(analyzer, element, hit.expression(), hit.segment())) {
+                FaceletsIndex.Entry entry = analyzer.index().entry(target.fileUri());
+                LineIndex lines = target.fileUri().equals(document.uri()) ? document.lines() : entry.lines();
+                locations.add(new Location(target.fileUri(), lines.range(target.start(), target.end())));
+            }
+        }
         return locations;
     }
 

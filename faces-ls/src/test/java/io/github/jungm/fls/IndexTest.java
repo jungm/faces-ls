@@ -39,7 +39,7 @@ class IndexTest {
 
     private static final String NS = " " + """
              xmlns="http://www.w3.org/1999/xhtml" xmlns:h="jakarta.faces.html" xmlns:ui="jakarta.faces.facelets"
-             xmlns:cc="jakarta.faces.composite" xmlns:comp="jakarta.faces.composite/comp\"""";
+             xmlns:cc="jakarta.faces.composite" xmlns:f="jakarta.faces.core" xmlns:comp="jakarta.faces.composite/comp\"""";
 
     private Path write(String relative, String text) throws Exception {
         Path file = workspace.resolve(relative);
@@ -201,6 +201,62 @@ class IndexTest {
         // "f" alone resolves into index.xhtml, a different file
         List<Location> form = new DefinitionProvider(analyzer, u -> null).definition(text.indexOf(":f:p1:street") + 1);
         assertEquals(uri(page), form.get(0).getUri());
+    }
+
+    @Test
+    void navigatesRelativeExpressionsToFormsAndIdsInOtherFiles() throws Exception {
+        write("shared/src/main/resources/META-INF/resources/comp/person.xhtml", "<ui:component" + NS + ">\n"
+                + "  <cc:interface/>\n"
+                + "  <cc:implementation>\n"
+                + "    <h:inputText id=\"street\"><f:ajax render=\"@form:p1:street\"/></h:inputText>\n"
+                + "    <h:commandButton id=\"save\" render=\"@form @namingcontainer street go\"/>\n"
+                + "  </cc:implementation>\n"
+                + "</ui:component>\n");
+        index.rebuildNow();
+        ElAnalyzer analyzer = analyzer(person);
+        String text = analyzer.document().text();
+        DefinitionProvider definitions = new DefinitionProvider(analyzer, u -> null);
+        String pageText = Files.readString(page);
+        String compositeText = Files.readString(angaben);
+
+        // the form is in index.xhtml, around the include around the composite
+        List<Location> form = definitions.definition(text.indexOf("@form:p1") + 2);
+        assertEquals(1, form.size(), form.toString());
+        assertEquals(uri(page), form.get(0).getUri());
+        assertEquals(lineOf(pageText, "id=\"f\""), form.get(0).getRange().getStart().getLine());
+
+        // ids below the form: the composite usage in angaben.xhtml, then the input in the composite itself
+        List<Location> usage = definitions.definition(text.indexOf("@form:p1") + "@form:p".length());
+        assertEquals(List.of(uri(angaben)), usage.stream().map(Location::getUri).toList());
+        assertEquals(lineOf(compositeText, "id=\"p1\""), usage.get(0).getRange().getStart().getLine());
+        List<Location> street = definitions.definition(text.indexOf("@form:p1:street") + "@form:p1:st".length());
+        assertEquals(List.of(uri(person)), street.stream().map(Location::getUri).toList());
+
+        List<Location> alone = definitions.definition(text.indexOf("\"@form ") + 2);
+        assertEquals(List.of(uri(page)), alone.stream().map(Location::getUri).toList());
+        // the composite is the naming container: both of its usages in angaben.xhtml, the one without id too
+        List<Location> container = definitions.definition(text.indexOf("@namingcontainer") + 2);
+        assertEquals(List.of(uri(angaben), uri(angaben)), container.stream().map(Location::getUri).toList());
+        assertEquals(lineOf(compositeText, "id=\"p1\""), container.get(0).getRange().getStart().getLine());
+        assertTrue(definitions.definition(text.indexOf(" go\"") + 2).isEmpty(), "go is in the form, not in the composite");
+    }
+
+    @Test
+    void expandsTheCompositeThePagesModuleOverrides() throws Exception {
+        write("web/src/main/webapp/resources/comp/person.xhtml", "<ui:component" + NS + ">\n"
+                + "  <cc:interface/>\n"
+                + "  <cc:implementation><h:inputText id=\"city\"/></cc:implementation>\n"
+                + "</ui:component>\n");
+        index.rebuildNow();
+        ElAnalyzer analyzer = analyzer(page);
+        List<String> ids = ClientIds.forPage(index.snapshot(), new ComponentModel(analyzer.project()), uri(page)).stream()
+                .map(ClientIds.ClientId::id).toList();
+        assertTrue(ids.contains("f:p1:city"), ids.toString());
+        assertFalse(ids.contains("f:p1:street"), ids.toString());
+    }
+
+    private static int lineOf(String text, String needle) {
+        return (int) text.substring(0, text.indexOf(needle)).chars().filter(c -> c == '\n').count();
     }
 
     @Test

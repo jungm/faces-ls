@@ -13,6 +13,8 @@ import io.github.jungm.fls.Threads;
 import io.github.jungm.fls.analysis.ElAnalyzer;
 import io.github.jungm.fls.index.ClientIds;
 import io.github.jungm.fls.index.FaceletsIndex;
+import io.github.jungm.fls.xml.XmlAttribute;
+import io.github.jungm.fls.xml.XmlElement;
 
 /**
  * Absolute client ids ({@code :form:panel:name}) across the pages the current file ends up in.
@@ -74,6 +76,73 @@ final class ClientIdLookup {
             byLocation.putIfAbsent(occurrence.fileUri() + "#" + occurrence.start(), occurrence);
         }
         return new ArrayList<>(byLocation.values());
+    }
+
+    /** A component another file declares: the file and the range to show (its id, or its tag name without one). */
+    record Target(String fileUri, int start, int end) {
+    }
+
+    /**
+     * The components a relative expression ({@code @form:panel}, {@code @namingcontainer}, {@code panel:name}) on
+     * {@code element} resolves to in the pages the file ends up in, up to {@code lastSegment}: the enclosing form or
+     * naming container, which may be in a template, an including file or around a composite, followed by ids below
+     * it. Expressions with other keywords are not followed.
+     */
+    static List<Target> relative(ElAnalyzer analyzer, XmlElement element, SearchExpressions.Expression expression,
+                                 int lastSegment) {
+        FaceletsIndex.Snapshot snapshot = analyzer.index();
+        String uri = analyzer.document().uri();
+        if (expression.absolute() || expression.segments().isEmpty() || snapshot == null || snapshot.entry(uri) == null) {
+            return List.of();
+        }
+        List<SearchExpressions.Segment> segments = expression.segments()
+                .subList(0, Math.min(lastSegment + 1, expression.segments().size()));
+        SearchExpressions.Segment first = segments.get(0);
+        boolean startsAtKeyword = first.isKeyword();
+        if (startsAtKeyword && !first.keyword().equals("@form") && !first.keyword().equals("@namingcontainer")) {
+            return List.of();
+        }
+        for (int i = 1; i < segments.size(); i++) {
+            if (segments.get(i).isKeyword()) {
+                return List.of();
+            }
+        }
+        ComponentModel components = new ComponentModel(analyzer.project());
+        Map<String, Target> targets = new LinkedHashMap<>();
+        for (ClientIds.Context context : ClientIds.contexts(snapshot, components, uri, element.start())) {
+            ClientIds.Component base = startsAtKeyword && first.keyword().equals("@form") ? context.form()
+                    : context.namingContainer();
+            if (startsAtKeyword && segments.size() == 1) {
+                if (base != null) {
+                    Target target = target(snapshot, base);
+                    targets.putIfAbsent(target.fileUri() + "#" + target.start(), target);
+                }
+                continue;
+            }
+            if (base != null && base.clientId() == null) {
+                continue;
+            }
+            StringBuilder id = new StringBuilder(base == null ? "" : base.clientId());
+            for (int i = startsAtKeyword ? 1 : 0; i < segments.size(); i++) {
+                if (!id.isEmpty()) {
+                    id.append(context.separator());
+                }
+                id.append(segments.get(i).text());
+            }
+            for (ClientIds.ClientId found : all(analyzer).getOrDefault(id.toString(), List.of())) {
+                if (found.pageUri().equals(context.pageUri())) {
+                    targets.putIfAbsent(found.fileUri() + "#" + found.start(),
+                            new Target(found.fileUri(), found.start(), found.end()));
+                }
+            }
+        }
+        return new ArrayList<>(targets.values());
+    }
+
+    private static Target target(FaceletsIndex.Snapshot snapshot, ClientIds.Component component) {
+        XmlAttribute id = ComponentModel.idAttribute(component.element());
+        return id != null && id.hasValue() ? new Target(component.fileUri(), id.valueStart(), id.valueEnd())
+                : new Target(component.fileUri(), component.element().nameStart(), component.element().nameEnd());
     }
 
     /** The client id an absolute expression spells up to (and including) a segment. */

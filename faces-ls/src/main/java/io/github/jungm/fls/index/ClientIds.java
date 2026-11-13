@@ -1,5 +1,6 @@
 package io.github.jungm.fls.index;
 
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -45,6 +46,21 @@ public final class ClientIds {
         }
     }
 
+    /**
+     * A component of an expanded page that a relative search expression can start from.
+     *
+     * @param clientId client id without leading separator, null when it is not stable
+     */
+    public record Component(String clientId, String fileUri, XmlElement element) {
+    }
+
+    /**
+     * Where an element sits in one page: the closest enclosing form and naming container, each the element itself
+     * when it is one.
+     */
+    public record Context(String pageUri, char separator, Component form, Component namingContainer) {
+    }
+
     private ClientIds() {
     }
 
@@ -77,6 +93,31 @@ public final class ClientIds {
         return byId;
     }
 
+    /**
+     * Where the element starting at {@code elementStart} in {@code uri} ends up in every page containing the file
+     * (the file on its own when no page uses it), so that relative search expressions such as {@code @form:panel}
+     * can be followed into the templates, includes and composites around it.
+     */
+    public static List<Context> contexts(Snapshot snapshot, ComponentModel components, String uri, int elementStart) {
+        return snapshot.cached("contexts:" + components.project().root() + ":" + uri + "#" + elementStart, () -> {
+            Set<String> pages = snapshot.pagesContaining(uri);
+            List<String> expand = pages.isEmpty() ? List.of(uri) : List.copyOf(pages);
+            List<Context> result = new ArrayList<>();
+            for (String page : expand) {
+                Entry entry = snapshot.entry(page);
+                if (entry == null) {
+                    continue;
+                }
+                Expander expander = new Expander(snapshot, components, page, snapshot.separatorFor(entry));
+                expander.targetUri = uri;
+                expander.targetStart = elementStart;
+                expander.expandFile(page, List.of(), true, new ArrayDeque<>());
+                result.addAll(expander.contexts);
+            }
+            return List.copyOf(result);
+        });
+    }
+
     /** Defines of a template client: name to the ui:define element and the file it is in. */
     private record Define(XmlElement element, String uri) {
     }
@@ -86,14 +127,22 @@ public final class ClientIds {
         private final ComponentModel components;
         private final String pageUri;
         private final char separator;
+        private final Path pageWebRoot;
         private final List<ClientId> result = new ArrayList<>();
         private final Deque<String> stack = new ArrayDeque<>();
+        /** Enclosing naming containers of the element being walked, innermost first. */
+        private final Deque<Component> containers = new ArrayDeque<>();
+        private final List<Context> contexts = new ArrayList<>();
+        private String targetUri;
+        private int targetStart = -1;
 
         Expander(Snapshot snapshot, ComponentModel components, String pageUri, char separator) {
             this.snapshot = snapshot;
             this.components = components;
             this.pageUri = pageUri;
             this.separator = separator;
+            Entry page = snapshot.entry(pageUri);
+            this.pageWebRoot = page == null ? null : page.webRoot();
         }
 
         void expandFile(String uri, List<String> prefix, boolean stable, Deque<Map<String, Define>> defines) {
@@ -112,6 +161,7 @@ public final class ClientIds {
         }
 
         private void walk(String uri, XmlElement element, List<String> prefix, boolean stable, Deque<Map<String, Define>> defines) {
+            boolean target = element.start() == targetStart && uri.equals(targetUri);
             String namespace = Namespaces.canonical(element.namespace());
             String local = element.localName();
             if (Namespaces.FACELETS.equals(namespace)) {
@@ -158,6 +208,9 @@ public final class ClientIds {
             Edge composite = edge(uri, element, Kind.COMPOSITE);
             boolean component = composite != null || components.isComponent(element);
             if (!component) {
+                if (target) {
+                    recordContext();
+                }
                 walkChildren(uri, element, prefix, stable, defines);
                 return;
             }
@@ -175,7 +228,22 @@ public final class ClientIds {
                 inner = new ArrayList<>(prefix);
                 inner.add(stableId ? id : "?");
                 innerStable = stable && stableId && !components.isIterating(element);
+                containers.push(new Component(stable && stableId ? join(prefix, id) : null, uri, element));
             }
+            if (target) {
+                recordContext();
+            }
+            try {
+                walkInside(uri, element, composite, inner, innerStable, defines);
+            } finally {
+                if (container) {
+                    containers.pop();
+                }
+            }
+        }
+
+        private void walkInside(String uri, XmlElement element, Edge composite, List<String> inner, boolean innerStable,
+                                Deque<Map<String, Define>> defines) {
             if (composite != null) {
                 Entry implementation = snapshot.entry(composite.to());
                 XmlElement body = implementation == null ? null : findImplementation(implementation);
@@ -190,6 +258,17 @@ public final class ClientIds {
             walkChildren(uri, element, inner, innerStable, defines);
         }
 
+        private void recordContext() {
+            Component form = null;
+            for (Component container : containers) {
+                if (container.element().localName().equals("form")) {
+                    form = container;
+                    break;
+                }
+            }
+            contexts.add(new Context(pageUri, separator, form, containers.peek()));
+        }
+
         private void walkChildren(String uri, XmlElement element, List<String> prefix, boolean stable,
                                   Deque<Map<String, Define>> defines) {
             for (XmlElement child : element.children()) {
@@ -197,9 +276,26 @@ public final class ClientIds {
             }
         }
 
+        /**
+         * The file an element uses. A composite or view path can resolve to several files when modules override
+         * one another (a web application's {@code resources/} over a jar's {@code META-INF/resources}); the one in
+         * the page's own web root is what the page renders.
+         */
         private Edge edge(String uri, XmlElement element, Kind kind) {
-            Edge edge = snapshot.edgeAt(uri, element);
-            return edge != null && edge.kind() == kind ? edge : null;
+            Edge first = null;
+            for (Edge edge : snapshot.uses(uri)) {
+                if (edge.element() != element || edge.kind() != kind) {
+                    continue;
+                }
+                Entry target = snapshot.entry(edge.to());
+                if (pageWebRoot != null && target != null && pageWebRoot.equals(target.webRoot())) {
+                    return edge;
+                }
+                if (first == null) {
+                    first = edge;
+                }
+            }
+            return first;
         }
 
         private static Define lookup(Deque<Map<String, Define>> defines, String name) {
