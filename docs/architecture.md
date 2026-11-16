@@ -85,6 +85,10 @@ source folders and the classpath is empty.
   only `.css` for `outputStylesheet` and `.js` for `outputScript`), outside a library the paths below the
   project's own resource directories (jar resources are only offered in their libraries), and contracts.
   `#{resource['` offers `library:` (accepting one asks again, for its names), `this:` and plain names.
+  Hover on the same references (`features/ResourceReferences.java`, shared with go to definition) previews the file
+  (`features/ResourcePreview.java`): images as Markdown images with a `file:` URI, scaled to 320×240 with VS Code's
+  `|width=,height=` suffix (size from the image header or the SVG's `width`/`height`/`viewBox`), the first 25 lines
+  of text files in a code block, size and origin (`name.jar!/entry` for extracted jar entries) of everything else.
 - **Project configuration**: `WEB-INF/faces-config.xml` of web roots, `META-INF/*faces-config.xml` of source
   folders, classpath directories and jars (resource bundles and `<managed-bean>` entries), web.xml context params.
 - **Web roots** (`project/WebRoots.java`): `src/main/webapp`, `WebContent`, `web`, `webapp` and

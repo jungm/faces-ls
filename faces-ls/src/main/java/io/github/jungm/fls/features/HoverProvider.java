@@ -74,6 +74,11 @@ public final class HoverProvider {
                 return hover(text, cursor.attribute().nameStart(), cursor.attribute().nameEnd());
             }
             case ATTRIBUTE_VALUE -> {
+                ResourceReferences.Target resource = ResourceReferences.attribute(analyzer, cursor.element(), cursor.attribute(), offset);
+                if (resource != null) {
+                    String text = ResourcePreview.markdown(analyzer.project(), resource.files());
+                    return text == null ? null : hover(text, resource.start(), resource.end());
+                }
                 return searchExpressionHover(cursor, offset);
             }
             default -> {
@@ -145,6 +150,10 @@ public final class HoverProvider {
         ElLookup.Hit hit = ElLookup.find(analyzer, site, offset);
         if (hit == null) {
             return null;
+        }
+        if (ResourceReferences.isResourceKey(analyzer, hit)) {
+            String text = ResourcePreview.markdown(analyzer.project(), ResourceReferences.key(analyzer, hit.name()));
+            return text == null ? null : hover(text, hit.start(), hit.end());
         }
         switch (hit.kind()) {
             case VARIABLE -> {

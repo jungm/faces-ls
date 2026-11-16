@@ -93,6 +93,24 @@ public final class LibraryFiles {
         }
     }
 
+    /**
+     * Where an extracted file came from, as {@code name.jar!/entry}, or null for a file that is not in the cache of
+     * jar entries.
+     */
+    public static String origin(Path file) {
+        Path absolute = file.toAbsolutePath().normalize();
+        if (!absolute.startsWith(CACHE) || absolute.getNameCount() < CACHE.getNameCount() + 2) {
+            return null;
+        }
+        String jarKey = absolute.getName(CACHE.getNameCount()).toString();
+        int dash = jarKey.lastIndexOf('-');
+        if (dash <= 0 || !jarKey.substring(dash + 1).matches("[0-9a-f]{32}")) {
+            return null;
+        }
+        Path entry = absolute.subpath(CACHE.getNameCount() + 1, absolute.getNameCount());
+        return jarKey.substring(0, dash) + "!/" + entry.toString().replace('\\', '/');
+    }
+
     /** Extracts a resource bundled with faces-ls (such as the standard taglibs) and returns the file, or null. */
     public static Path extractResource(String resource) {
         String version = LibraryFiles.class.getPackage().getImplementationVersion();

@@ -10,9 +10,9 @@ by the [Faces Language Server](https://github.com/jungm/faces-ls).
 - Tags come from the tag libraries and composite components of your project and its jars, so PrimeFaces,
   OmniFaces and your own components need no setup
 - Navigation through templates, includes, composite components, component ids and search expressions like `@form`
-- Completion and go to definition for resources: `library`/`name` of `h:graphicImage`, `h:outputScript`,
-  `h:outputStylesheet`, `#{resource['library:name']}` and `f:view contracts`, in the web app, other modules, jars
-  and resource library contracts
+- Completion, go to definition and hover previews for resources: `library`/`name` of `h:graphicImage`,
+  `h:outputScript`, `h:outputStylesheet`, `#{resource['library:name']}` and `f:view contracts`, in the web app,
+  other modules, jars and resource library contracts. Hovering shows images and the start of stylesheets and scripts
 - Diagnostics for unknown tags and attributes, missing required attributes, EL errors and unresolved names
 - Find references and call hierarchy, including the pages that use a Java method or property
 - Quick fixes to declare namespaces and add required attributes, snippets for common tags
