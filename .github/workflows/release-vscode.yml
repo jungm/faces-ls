@@ -80,6 +80,11 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.release }}
         run: |
+          if ! grep -qx '## Unreleased' CHANGELOG.md; then
+            echo "::error::vscode/CHANGELOG.md has no '## Unreleased' section"
+            exit 1
+          fi
+          sed -i "s/^## Unreleased\$/## $VERSION ($(date -u +%F))/" CHANGELOG.md
           npm ci
           npm version "$VERSION" --no-git-tag-version
           npm run server
@@ -92,10 +97,13 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m "Release VS Code extension $VERSION" vscode/package.json vscode/package-lock.json
+          git commit -m "Release VS Code extension $VERSION" \
+              vscode/package.json vscode/package-lock.json vscode/CHANGELOG.md
           git tag -a "vscode-$VERSION" -m "VS Code extension $VERSION"
           (cd vscode && npm version "$NEXT" --no-git-tag-version)
-          git commit -m "Prepare VS Code extension $NEXT" vscode/package.json vscode/package-lock.json
+          sed -i '0,/^## /s//## Unreleased\n\n## /' vscode/CHANGELOG.md
+          git commit -m "Prepare VS Code extension $NEXT" \
+              vscode/package.json vscode/package-lock.json vscode/CHANGELOG.md
           git push --atomic origin HEAD:main "vscode-$VERSION"
 
       - uses: actions/upload-artifact@v7
