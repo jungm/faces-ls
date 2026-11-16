@@ -221,6 +221,9 @@ public final class JdtClient implements AutoCloseable {
         Socket socket = new Socket();
         try {
             socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), candidate.port()), 2000);
+            // a message goes out as header and body; held back for the acknowledgement of the header, every
+            // request would wait some 40 ms
+            socket.setTcpNoDelay(true);
             Launcher<FacesJdtService> launcher = new Launcher.Builder<FacesJdtService>()
                     .setLocalService(new Events())
                     .setRemoteInterface(FacesJdtService.class)

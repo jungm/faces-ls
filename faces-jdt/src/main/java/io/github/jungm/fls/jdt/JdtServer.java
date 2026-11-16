@@ -170,6 +170,9 @@ final class JdtServer {
         while (!serverSocket.isClosed()) {
             try {
                 Socket socket = serverSocket.accept();
+                // a message goes out as header and body; held back for the acknowledgement of the header, every
+                // answer would wait some 40 ms
+                socket.setTcpNoDelay(true);
                 new Connection(socket).start();
             } catch (IOException | RuntimeException e) {
                 if (!serverSocket.isClosed()) {
