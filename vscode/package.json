@@ -159,6 +159,15 @@
           "scope": "machine-overridable",
           "description": "JVM arguments for the language server."
         },
+        "faces.server.extensions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine-overridable",
+          "markdownDescription": "Paths of extension jars for the language server, which add support for frameworks on top of Jakarta Faces. Other VS Code extensions contribute theirs without this setting. Takes effect after a restart."
+        },
         "faces.server.logFile": {
           "type": [
             "string",

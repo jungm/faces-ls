@@ -7,6 +7,7 @@ import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,10 +61,15 @@ import org.eclipse.lsp4j.HoverParams;
 import org.eclipse.lsp4j.InitializeParams;
 import org.eclipse.lsp4j.InitializeResult;
 import org.eclipse.lsp4j.InitializedParams;
+import org.eclipse.lsp4j.InlayHint;
+import org.eclipse.lsp4j.InlayHintParams;
 import org.eclipse.lsp4j.Location;
 import org.eclipse.lsp4j.LocationLink;
+import org.eclipse.lsp4j.MarkupContent;
+import org.eclipse.lsp4j.MarkupKind;
 import org.eclipse.lsp4j.MessageActionItem;
 import org.eclipse.lsp4j.MessageType;
+import org.eclipse.lsp4j.Position;
 import org.eclipse.lsp4j.PublishDiagnosticsParams;
 import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.ReferenceParams;
@@ -115,6 +121,7 @@ import io.github.jungm.fls.taglib.TagLibrary;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 
 /**
@@ -158,6 +165,10 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     private Path rendezvous;
     private boolean semanticTokensRefresh;
     private ScheduledFuture<?> pendingRefresh;
+    private Extensions extensions = Extensions.of(List.of());
+    private boolean inlayHintRefresh;
+    private boolean configurationRequests;
+    private ScheduledFuture<?> pendingInlayHintRefresh;
 
     @Override
     public void connect(LanguageClient languageClient) {
@@ -182,6 +193,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         var workspaceCapabilities = params.getCapabilities() == null ? null : params.getCapabilities().getWorkspace();
         semanticTokensRefresh = workspaceCapabilities != null && workspaceCapabilities.getSemanticTokens() != null
                 && Boolean.TRUE.equals(workspaceCapabilities.getSemanticTokens().getRefreshSupport());
+        inlayHintRefresh = workspaceCapabilities != null && workspaceCapabilities.getInlayHint() != null
+                && Boolean.TRUE.equals(workspaceCapabilities.getInlayHint().getRefreshSupport());
+        configurationRequests = workspaceCapabilities != null && Boolean.TRUE.equals(workspaceCapabilities.getConfiguration());
 
         rendezvous = rendezvousDirectory(options);
         jdt = new JdtClient(rendezvous, roots,
@@ -190,6 +204,8 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         index = new FaceletsIndex(roots, () -> { });
         index.start();
         jdt.start();
+        extensions = Extensions.load(options);
+        extensions.start(new Host());
         LOG.info("faces-ls started for " + roots + ", rendezvous " + rendezvous);
 
         ServerCapabilities capabilities = new ServerCapabilities();
@@ -203,9 +219,23 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         capabilities.setCodeLensProvider(new CodeLensOptions(false));
         capabilities.setSemanticTokensProvider(
                 new SemanticTokensWithRegistrationOptions(SemanticTokensProvider.legend(), true, true));
-        capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(List.of(UsageProvider.NO_OP_COMMAND)));
+        List<String> commands = new ArrayList<>(List.of(UsageProvider.NO_OP_COMMAND));
+        commands.addAll(extensions.commands());
+        capabilities.setExecuteCommandProvider(new ExecuteCommandOptions(commands));
         capabilities.setCodeActionProvider(new CodeActionOptions(
                 List.of(CodeActionKind.QuickFix, CodeActionProvider.ADD_MISSING_NAMESPACES)));
+        if (!extensions.isEmpty()) {
+            // faces-ls has no inlay hints of its own
+            capabilities.setInlayHintProvider(true);
+        }
+        if (extensions.supportsJava()) {
+            JsonObject faces = new JsonObject();
+            faces.addProperty("javaDefinition", true);
+            faces.addProperty("javaInlayHints", true);
+            JsonObject experimental = new JsonObject();
+            experimental.add("faces", faces);
+            capabilities.setExperimental(experimental);
+        }
         return CompletableFuture.completedFuture(new InitializeResult(capabilities, new ServerInfo("faces-ls", "0.1.0")));
     }
 
@@ -261,6 +291,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         for (String pattern : List.of("**/*.xhtml", "**/faces-config.xml", "**/web.xml", "**/*.taglib.xml", "**/*.properties")) {
             watchers.add(new FileSystemWatcher(Either.forLeft(pattern)));
         }
+        for (String pattern : extensions.watchedFiles()) {
+            watchers.add(new FileSystemWatcher(Either.forLeft(pattern)));
+        }
         Registration registration = new Registration("faces-ls-watchers", "workspace/didChangeWatchedFiles",
                 new DidChangeWatchedFilesRegistrationOptions(watchers));
         client.registerCapability(new RegistrationParams(List.of(registration))).exceptionally(error -> {
@@ -268,6 +301,104 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             return null;
         });
         worker.schedule(() -> requests.execute("jdtls check", this::offerToStartJdtls), 12, TimeUnit.SECONDS);
+        configureExtensions();
+    }
+
+    /**
+     * Asks the client for the settings of each extension and hands them over. Clients that do not answer
+     * {@code workspace/configuration} leave the extensions with their defaults.
+     */
+    private void configureExtensions() {
+        if (!configurationRequests) {
+            return;
+        }
+        for (FacesExtension extension : extensions.all()) {
+            String section = extension.configurationSection();
+            if (section == null || section.isBlank()) {
+                continue;
+            }
+            ConfigurationItem item = new ConfigurationItem();
+            item.setSection(section);
+            client.configuration(new ConfigurationParams(List.of(item))).thenAcceptAsync(answer -> {
+                Object value = answer == null || answer.isEmpty() ? null : answer.get(0);
+                extensions.configure(extension, value instanceof JsonElement json ? json : JsonNull.INSTANCE);
+                refreshInlayHints();
+            }, worker).exceptionally(error -> {
+                LOG.log(Level.FINE, "no settings for extension " + extension.id(), error);
+                return null;
+            });
+        }
+    }
+
+    /** What extensions get from the server. */
+    private final class Host implements ExtensionHost {
+        @Override
+        public List<Path> workspaceRoots() {
+            return roots;
+        }
+
+        @Override
+        public ElAnalyzer analyzer(String uri) {
+            FacesDocument document = documents.get(uri);
+            if (document == null) {
+                FaceletsIndex.Snapshot snapshot = index.snapshot();
+                FaceletsIndex.Entry entry = snapshot == null ? null : snapshot.entry(uri);
+                if (entry == null) {
+                    return null;
+                }
+                document = new FacesDocument(uri, entry.text(), 0);
+            }
+            return FacesLanguageServer.this.analyzer(document, settings);
+        }
+
+        @Override
+        public FaceletsIndex.Snapshot index() {
+            return index.snapshot();
+        }
+
+        @Override
+        public ProjectModel project(Path file) {
+            return projects.forFile(file);
+        }
+
+        @Override
+        public boolean javaConnected() {
+            return jdt != null && jdt.connected();
+        }
+
+        @Override
+        public void refreshInlayHints() {
+            FacesLanguageServer.this.refreshInlayHints();
+        }
+
+        @Override
+        public List<StringArgument> stringArguments(String uri, Position position, Collection<String> receiverTypes) {
+            if (jdt == null || !jdt.connected()) {
+                return List.of();
+            }
+            JsonObject request = new JsonObject();
+            request.addProperty("uri", uri);
+            if (position != null) {
+                request.addProperty("line", position.getLine());
+                request.addProperty("character", position.getCharacter());
+            }
+            JsonArray types = new JsonArray();
+            receiverTypes.forEach(types::add);
+            request.add("receiverTypes", types);
+            List<StringArgument> result = new ArrayList<>();
+            if (jdt.request("stringArguments", request, 15000) instanceof JsonArray arguments) {
+                for (JsonElement element : arguments) {
+                    JsonObject argument = element.getAsJsonObject();
+                    List<String> types0 = new ArrayList<>();
+                    argument.getAsJsonArray("receiverTypes").forEach(type -> types0.add(type.getAsString()));
+                    result.add(new StringArgument(argument.get("value").getAsString(),
+                            LSP_JSON.fromJson(argument.get("range"), Range.class), argument.get("literal").getAsBoolean(),
+                            argument.get("method").getAsString(), argument.get("index").getAsInt(),
+                            argument.get("argumentCount").getAsInt(), List.copyOf(types0)));
+                }
+            }
+            return result;
+        }
     }
 
     /**
@@ -474,6 +605,23 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             scheduleDiagnostics(uri, 50);
         }
         scheduleSemanticTokensRefresh();
+        refreshInlayHints();
+    }
+
+    /** Asks the client to request inlay hints again; they all come from extensions. */
+    private synchronized void refreshInlayHints() {
+        if (!inlayHintRefresh || extensions.isEmpty()) {
+            return;
+        }
+        if (pendingInlayHintRefresh != null) {
+            pendingInlayHintRefresh.cancel(false);
+        }
+        pendingInlayHintRefresh = worker.schedule(() -> {
+            client.refreshInlayHints().exceptionally(error -> {
+                LOG.log(Level.FINE, "inlay hint refresh failed", error);
+                return null;
+            });
+        }, 100, TimeUnit.MILLISECONDS);
     }
 
     /** Asks the client to request semantic tokens again, once beans, types or taglibs have changed. */
@@ -553,23 +701,64 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     public CompletableFuture<Hover> hover(HoverParams params) {
         return onDocument("hover", params.getTextDocument().getUri(), null, (document, analyzer, current) -> {
             LOG.fine(() -> "hover at " + params.getPosition().getLine() + ":" + params.getPosition().getCharacter());
-            return new HoverProvider(analyzer).hover(document.lines().offset(params.getPosition()));
+            int offset = document.lines().offset(params.getPosition());
+            String extended = extensions.hover(new FaceletsPosition(analyzer, offset));
+            if (extended != null) {
+                return new Hover(new MarkupContent(MarkupKind.MARKDOWN, extended));
+            }
+            return new HoverProvider(analyzer).hover(offset);
         });
     }
 
     @Override
     public CompletableFuture<Either<List<? extends Location>, List<? extends LocationLink>>> definition(DefinitionParams params) {
+        if (isJava(params.getTextDocument().getUri())) {
+            return onJava("definition", Either.forLeft(List.<Location>of()), cancel -> {
+                ProjectModel project = javaProject(params.getTextDocument().getUri());
+                return Either.forLeft(project == null ? List.<Location>of() : extensions.javaDefinition(
+                        new JavaPosition(params.getTextDocument().getUri(), params.getPosition(), project)));
+            });
+        }
         return onDocument("definition", params.getTextDocument().getUri(), Either.forLeft(List.<Location>of()),
                 (document, analyzer, current) -> {
+                    int offset = document.lines().offset(params.getPosition());
+                    List<Location> extended = extensions.definition(new FaceletsPosition(analyzer, offset));
+                    if (!extended.isEmpty()) {
+                        return Either.forLeft(extended);
+                    }
                     DefinitionProvider provider = new DefinitionProvider(analyzer, other -> {
                         FacesDocument open = documents.get(other);
                         return open == null ? null : open.text();
                     });
-                    List<Location> locations = provider.definition(document.lines().offset(params.getPosition()));
+                    List<Location> locations = provider.definition(offset);
                     LOG.fine(() -> "definition at " + params.getPosition().getLine() + ":"
                             + params.getPosition().getCharacter() + " -> " + locations);
                     return Either.forLeft(locations);
                 });
+    }
+
+    /** Inlay hints, which only extensions have: of Facelets documents, and of Java documents for those that take them. */
+    @Override
+    public CompletableFuture<List<InlayHint>> inlayHint(InlayHintParams params) {
+        String uri = params.getTextDocument().getUri();
+        if (isJava(uri)) {
+            return onJava("inlay hints", List.of(), cancel -> {
+                ProjectModel project = javaProject(uri);
+                return project == null ? List.<InlayHint>of()
+                        : extensions.javaInlayHints(new JavaRange(uri, params.getRange(), project));
+            });
+        }
+        return onDocument("inlay hints", uri, List.of(), (document, analyzer, current) -> extensions.inlayHints(
+                new FaceletsRange(analyzer, document.lines().offset(params.getRange().getStart()),
+                        document.lines().offset(params.getRange().getEnd()))));
+    }
+
+    /** The project of a Java source file; null for extensions without Java support and for library classes. */
+    private ProjectModel javaProject(String uri) {
+        if (!extensions.supportsJava() || !uri.startsWith("file:")) {
+            return null;
+        }
+        return projects.forFile(Path.of(URI.create(uri)));
     }
 
     @Override
@@ -801,13 +990,24 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public CompletableFuture<Object> executeCommand(ExecuteCommandParams params) {
-        // the usage code lens is informational
-        return CompletableFuture.completedFuture(null);
+        if (UsageProvider.NO_OP_COMMAND.equals(params.getCommand())) {
+            // the usage code lens is informational
+            return CompletableFuture.completedFuture(null);
+        }
+        // the commands of extensions
+        return requests.compute(params.getCommand(), cancel -> {
+            List<JsonElement> arguments = new ArrayList<>();
+            if (params.getArguments() != null) {
+                params.getArguments().forEach(argument -> arguments.add(LSP_JSON.toJsonTree(argument)));
+            }
+            return extensions.executeCommand(params.getCommand(), arguments);
+        }, null);
     }
 
     /**
      * Settings changed: clients send them under {@code "faces"}, under {@code "faces-ls"} or as is. Diagnostics and
-     * semantic tokens of the open documents follow.
+     * semantic tokens of the open documents follow. The extensions are asked to read their own settings again, which
+     * the notification need not contain.
      */
     @Override
     public void didChangeConfiguration(DidChangeConfigurationParams params) {
@@ -817,6 +1017,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             LOG.info("settings updated: namespaces " + settings.namespaces().keySet() + ", imports " + settings.imports().tags());
             republishAll();
         }
+        configureExtensions();
     }
 
     @Override
@@ -824,6 +1025,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         boolean relevant = false;
         boolean configuration = false;
         boolean composites = false;
+        List<Path> changed = new ArrayList<>();
         for (FileEvent event : params.getChanges()) {
             String uri = event.getUri();
             Path file;
@@ -836,14 +1038,25 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             if (WebRoots.inSkippedDirectory(roots, file)) {
                 continue;
             }
+            changed.add(file);
+            String name = file.getFileName() == null ? "" : file.getFileName().toString();
+            if (!(name.endsWith(".xhtml") || name.endsWith(".xml") || name.endsWith(".properties"))) {
+                // watched for an extension only
+                continue;
+            }
             relevant = true;
             worker.execute(() -> index.fileChanged(file));
-            String name = file.getFileName() == null ? "" : file.getFileName().toString();
             if (name.endsWith("faces-config.xml") || name.endsWith("web.xml") || name.endsWith(".taglib.xml")) {
                 configuration = true;
             } else if (name.endsWith(".xhtml") && isCompositeComponent(file)) {
                 composites = true;
             }
+        }
+        if (!changed.isEmpty() && !extensions.isEmpty()) {
+            requests.execute("extension file changes", () -> {
+                extensions.filesChanged(List.copyOf(changed));
+                refreshInlayHints();
+            });
         }
         if (!relevant) {
             return;

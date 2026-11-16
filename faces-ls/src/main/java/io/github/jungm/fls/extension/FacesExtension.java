@@ -69,6 +69,20 @@ public interface FacesExtension {
     }
 
     /**
+     * The names of the commands the extension answers, e.g. {@code kyusu.replacements}. faces-ls announces them as
+     * {@code workspace/executeCommand} commands, which is how the editor side of an extension asks for what no LSP
+     * request carries.
+     */
+    default List<String> commands() {
+        return List.of();
+    }
+
+    /** The answer to one of {@link #commands}, or null. */
+    default JsonElement executeCommand(String command, List<JsonElement> arguments) {
+        return null;
+    }
+
+    /**
      * Whether the extension answers {@link #javaDefinition} and {@link #javaInlayHints}. faces-ls then announces in
      * its capabilities ({@code experimental.faces.javaDefinition}, {@code experimental.faces.javaInlayHints}) that
      * clients may send it those requests for Java documents too.

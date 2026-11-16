@@ -101,6 +101,7 @@ source folders and the classpath is empty.
   such as `f:importConstants`, `p:importEnum` or `o:importFunctions`, configurable through the `imports` setting),
   and type evaluation through faces-jdt's type descriptions.
 - **Beans**: from faces-jdt (below) plus `<managed-bean>` entries of faces-config files.
+- **Extensions** (`extension/`): jars that add support for frameworks on top of Faces, see [Extensions](#extensions).
 - **LSP features** (`ServerCapabilities` in `FacesLanguageServer.initialize`): completion, hover, definition,
   references, call hierarchy, code lens, semantic tokens (full and range), publishDiagnostics, and code actions
   of kind `quickfix` (declare an undeclared prefix that is predefined in the `namespaces` setting, add missing
@@ -130,6 +131,7 @@ Requests (`FacesJdtService.java`; each query takes `path`, a file of the project
 | `findTypes {prefix, limit?}` | `[{fqn, simpleName}]` of public types |
 | `callHierarchy/prepare`, `callHierarchy/incoming`, `callHierarchy/outgoing` | jdtls' own call hierarchy items and calls |
 | `member {uri, line, character}` | `{declaringType, name, kind, parameterCount}` of the member declared or used at a position of a Java file |
+| `stringArguments {uri, line?, character?, receiverTypes?}` | `[{value, range, literal, method, index, argumentCount, receiverTypes}]`: the arguments of method calls in a Java file that have a constant `String` value (literals, constants, concatenations of them), for [extensions](#extensions). With a position, only the argument a string literal at that position belongs to. `receiverTypes` limits the answer to calls on these types or their subtypes; in the answer it lists the type the method is called on and its supertypes. The arguments of a whole file are kept for the text they were computed from, until the Java model changes |
 
 Notification to faces-ls (`FacesJdtEvents.java`): `javaChanged`. `JavaChangeListener` watches `POST_CHANGE` deltas
 of the Java model and skips deltas that only open a working copy or only touch non-Java resources. A relevant
@@ -185,6 +187,38 @@ expressions and calls, imported constants, and functions (`o:importFunctions`, t
 A source file of a nested module also belongs to each enclosing project in the Eclipse workspace (the aggregator
 of a multi-module build); faces-jdt takes the copy that exists in the Java model. The VS Code extension registers
 both providers for Java documents.
+
+## Extensions
+
+Frameworks on top of Faces have conventions faces-ls does not know: beans whose string keys name messages or
+configuration entries, files merged in an order of their own. An extension adds them. It is a jar with an
+implementation of `io.github.jungm.fls.extension.FacesExtension`, named in
+`META-INF/services/io.github.jungm.fls.extension.FacesExtension` and listed in the `extensions` setting, which
+faces-ls reads when it starts. The jars are loaded in a class loader below that of faces-ls.
+
+An extension is compiled against faces-ls.jar and gets the model as it is with each request (`ElAnalyzer` with the
+document, its EL syntax trees and types, the project and the Facelets index). That model has no compatibility
+promise, so an extension is built for the faces-ls it runs in.
+
+| Hook | Use |
+|---|---|
+| `definition`, `hover` | Asked before faces-ls for a position in a Facelets document; a non-empty answer replaces that of faces-ls |
+| `inlayHints` | The only inlay hints there are; `inlayHintProvider` is announced when an extension is loaded |
+| `javaDefinition`, `javaInlayHints` | For Java documents, when the extension says `supportsJava`. faces-ls has no text of Java documents; `ExtensionHost.stringArguments` asks faces-jdt for the string arguments of method calls |
+| `configurationSection`, `configure` | faces-ls asks the client for that section (`workspace/configuration`) after `initialized` and after every `workspace/didChangeConfiguration` |
+| `commands`, `executeCommand` | Announced as `workspace/executeCommand` commands, for what no LSP request carries: the editor side of an extension calls them and renders the answer. `ExtensionHost` gives the analyzer of an open or indexed document, the Facelets index and the project of a file |
+| `watchedFiles`, `filesChanged` | Glob patterns added to the file watchers; every change of a watched file outside build directories is passed on |
+
+`ExtensionHost.refreshInlayHints` sends `workspace/inlayHint/refresh`; faces-ls sends it too when beans, types or
+watched files change. An extension that throws is logged and counts as having no answer.
+
+With an extension that supports Java, the capabilities carry `experimental.faces.javaDefinition` and
+`javaInlayHints`: clients may then send `textDocument/definition` and `textDocument/inlayHint` for Java documents
+to faces-ls as well and add the answers to those of jdtls. The VS Code extension registers providers for both
+while faces-jdt is connected. It finds extension jars in `faces.server.extensions` and in the `package.json` of
+other VS Code extensions, as `contributes.facesExtensions`: each entry the path of a jar, or
+`{"jar": "...", "configuration": "section"}` with the settings section the server extension reads, which the client
+then reports changes of.
 
 ## Facelets index
 

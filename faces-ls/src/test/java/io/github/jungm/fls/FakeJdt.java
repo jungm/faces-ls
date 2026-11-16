@@ -48,6 +48,7 @@ final class FakeJdt implements AutoCloseable {
     private final ServerSocket server;
     private final Map<String, JsonObject> types = new ConcurrentHashMap<>();
     private final JsonArray beans = new JsonArray();
+    private volatile JsonElement stringArguments = new JsonArray();
     private final Map<String, AtomicInteger> requests = new ConcurrentHashMap<>();
     private final Set<String> failingTypes = ConcurrentHashMap.newKeySet();
     private final Map<String, Hold> holds = new ConcurrentHashMap<>();
@@ -150,6 +151,12 @@ final class FakeJdt implements AutoCloseable {
     }
 
     /** Makes {@code type} requests for {@code fqn} fail with an error response until {@link #recover} is called. */
+    /** The answer to every {@code stringArguments} request. */
+    FakeJdt stringArguments(JsonElement answer) {
+        stringArguments = answer;
+        return this;
+    }
+
     FakeJdt failing(String fqn) {
         failingTypes.add(fqn);
         return this;
@@ -319,6 +326,11 @@ final class FakeJdt implements AutoCloseable {
         @Override
         public CompletableFuture<JsonElement> member(JsonObject params) {
             return answer("member", params, JsonNull.INSTANCE);
+        }
+
+        @Override
+        public CompletableFuture<JsonElement> stringArguments(JsonObject params) {
+            return answer("stringArguments", params, stringArguments);
         }
     }
 

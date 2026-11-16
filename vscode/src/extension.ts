@@ -9,6 +9,8 @@ const MIN_JAVA_VERSION = 21;
 let client: LanguageClient | undefined;
 let javaProviders: JavaProviders | undefined;
 let output: vscode.LogOutputChannel | undefined;
+/** The extension jars the running server was started with. */
+let loadedExtensions = '';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel('Faces Language Server', { log: true });
@@ -20,6 +22,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await startClient(context);
     }),
     vscode.commands.registerCommand('faces.showOutput', () => output?.show()),
+    vscode.extensions.onDidChange(async () => {
+      const jars = serverExtensions(vscode.workspace.getConfiguration('faces')).jars.join(path.delimiter);
+      if (client && jars !== loadedExtensions) {
+        const restart = 'Restart';
+        const choice = await vscode.window.showInformationMessage(
+          'The Faces language server needs a restart to load the changed extensions.',
+          restart,
+        );
+        if (choice === restart) {
+          await vscode.commands.executeCommand('faces.restartServer');
+        }
+      }
+    }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (
         event.affectsConfiguration('faces.java.home') ||
@@ -78,6 +93,11 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     },
   };
 
+  const extensions = serverExtensions(config);
+  loadedExtensions = extensions.jars.join(path.delimiter);
+  if (extensions.jars.length > 0) {
+    output?.info(`Extensions: ${extensions.jars.join(', ')}`);
+  }
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: 'file', language: 'facelets' },
@@ -85,9 +105,10 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
       ...(config.get<string[]>('elFiles') ?? []).map((pattern) => ({ scheme: 'file', pattern })),
     ],
     outputChannel: output,
-    initializationOptions: { settings: serverSettings(config) },
+    initializationOptions: { settings: { ...serverSettings(config), extensions: extensions.jars } },
     synchronize: {
-      configurationSection: 'faces',
+      // the server reads the settings of its extensions itself, once it hears that they changed
+      configurationSection: ['faces', ...extensions.sections],
     },
   };
 
@@ -112,6 +133,34 @@ async function stopClient(): Promise<void> {
   if (running) {
     await running.stop();
   }
+}
+
+/**
+ * The extensions of the language server: the jars of `faces.server.extensions` and those other VS Code extensions
+ * contribute as `contributes.facesExtensions` in their package.json, each either the path of a jar in that extension
+ * or `{ "jar": "...", "configuration": "section" }`, where the section is the one the server extension reads its
+ * settings from.
+ */
+function serverExtensions(config: vscode.WorkspaceConfiguration): { jars: string[]; sections: string[] } {
+  const jars = [...(config.get<string[]>('server.extensions') ?? [])];
+  const sections: string[] = [];
+  for (const extension of vscode.extensions.all) {
+    const contributed: unknown = extension.packageJSON?.contributes?.facesExtensions;
+    if (!Array.isArray(contributed)) {
+      continue;
+    }
+    for (const entry of contributed) {
+      const jar: unknown = typeof entry === 'string' ? entry : entry?.jar;
+      if (typeof jar !== 'string') {
+        continue;
+      }
+      jars.push(path.resolve(extension.extensionPath, jar));
+      if (typeof entry?.configuration === 'string' && !sections.includes(entry.configuration)) {
+        sections.push(entry.configuration);
+      }
+    }
+  }
+  return { jars, sections };
 }
 
 /** The settings object faces-ls reads, in its own key names. */

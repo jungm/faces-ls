@@ -63,4 +63,14 @@ public interface FacesJdtService {
      */
     @JsonRequest
     CompletableFuture<JsonElement> member(JsonObject params);
+
+    /**
+     * {@code {uri, line?, character?, receiverTypes?}}: {@code [{value, range, literal, method, index, argumentCount,
+     * receiverTypes}]}, the arguments of method calls in a Java file that have a constant {@code String} value. With a
+     * position, only the argument a string literal at that position belongs to. {@code receiverTypes} limits the
+     * answer to calls on one of these types or their subtypes; in the answer it lists the type the method is called
+     * on and its supertypes.
+     */
+    @JsonRequest
+    CompletableFuture<JsonElement> stringArguments(JsonObject params);
 }

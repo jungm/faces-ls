@@ -29,4 +29,6 @@ interface JavaQueries {
     JsonElement callHierarchyOutgoing(JsonObject params) throws Exception;
 
     JsonElement member(JsonObject params) throws Exception;
+
+    JsonElement stringArguments(JsonObject params) throws Exception;
 }

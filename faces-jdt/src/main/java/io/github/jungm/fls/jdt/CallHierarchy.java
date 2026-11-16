@@ -213,7 +213,7 @@ final class CallHierarchy {
         return member;
     }
 
-    private static ITypeRoot typeRoot(String uri) {
+    static ITypeRoot typeRoot(String uri) {
         if (uri.startsWith("file:")) {
             // a file of a nested module is also a file of each enclosing project (the aggregator of a multi-module
             // build); only the copy in the Java project that compiles it exists in the Java model

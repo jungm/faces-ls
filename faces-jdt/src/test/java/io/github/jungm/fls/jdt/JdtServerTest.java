@@ -109,6 +109,11 @@ class JdtServerTest {
         public JsonElement member(JsonObject params) {
             return JsonNull.INSTANCE;
         }
+
+        @Override
+        public JsonElement stringArguments(JsonObject params) {
+            return new JsonArray();
+        }
     };
 
     record Client(Socket socket, FacesJdtService service, Future<Void> listening) {

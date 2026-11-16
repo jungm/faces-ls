@@ -3,6 +3,9 @@ import {
   CallHierarchyIncomingCallsRequest,
   CallHierarchyOutgoingCallsRequest,
   CallHierarchyPrepareRequest,
+  DefinitionRequest,
+  InlayHintRefreshRequest,
+  InlayHintRequest,
   LanguageClient,
   ReferencesRequest,
 } from 'vscode-languageclient/node';
@@ -67,17 +70,64 @@ class References implements vscode.ReferenceProvider {
   }
 }
 
+/** What extensions of faces-ls know about a position in Java code, e.g. the definition of a message key; VS Code adds it to jdtls' definitions. */
+class Definitions implements vscode.DefinitionProvider {
+  constructor(private readonly client: LanguageClient) {}
+
+  async provideDefinition(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.Definition | vscode.DefinitionLink[] | undefined> {
+    const params = this.client.code2ProtocolConverter.asTextDocumentPositionParams(document, position);
+    const result = await this.client.sendRequest(DefinitionRequest.type, params, token);
+    return this.client.protocol2CodeConverter.asDefinitionResult(result, token);
+  }
+}
+
+/** The inlay hints of extensions of faces-ls in Java code; VS Code adds them to jdtls' hints. */
+class InlayHints implements vscode.InlayHintsProvider {
+  readonly changed = new vscode.EventEmitter<void>();
+  readonly onDidChangeInlayHints = this.changed.event;
+
+  constructor(private readonly client: LanguageClient) {}
+
+  async provideInlayHints(
+    document: vscode.TextDocument,
+    range: vscode.Range,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.InlayHint[] | undefined> {
+    const params = {
+      textDocument: this.client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+      range: this.client.code2ProtocolConverter.asRange(range),
+    };
+    const hints = await this.client.sendRequest(InlayHintRequest.type, params, token);
+    return this.client.protocol2CodeConverter.asInlayHints(hints, token);
+  }
+}
+
+/** What faces-ls announces under `experimental.faces` when one of its extensions answers requests on Java documents. */
+interface JavaCapabilities {
+  javaDefinition?: boolean;
+  javaInlayHints?: boolean;
+}
+
 /**
  * Facelets usages in the Java editor: references, merged by VS Code with jdtls' own, and the call hierarchy, which
  * faces-ls answers in place of jdtls'. Both are registered while faces-ls reaches faces-jdt, after jdtls is ready.
  * VS Code asks only one call hierarchy provider per document, the most recently registered among equally specific
  * ones, so that provider is registered again when a Java editor becomes active, so that it is the newest one even
  * after jdtls registered its providers anew.
+ *
+ * When an extension of faces-ls takes Java documents, definitions and inlay hints are registered alongside.
  */
 export class JavaProviders implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private registration: vscode.Disposable | undefined;
   private references: vscode.Disposable | undefined;
+  private definitions: vscode.Disposable | undefined;
+  private inlayHints: vscode.Disposable | undefined;
+  private hints: InlayHints | undefined;
   private connected = false;
   private generation = 0;
   private watchingModes = false;
@@ -122,6 +172,43 @@ export class JavaProviders implements vscode.Disposable {
     this.register();
     this.references ??= vscode.languages.registerReferenceProvider(JAVA, new References(this.client));
     this.log?.info('Java references and call hierarchy include Facelets usages');
+    this.registerExtensionProviders();
+  }
+
+  private registerExtensionProviders(): void {
+    const experimental = this.client.initializeResult?.capabilities.experimental as { faces?: JavaCapabilities } | undefined;
+    if (experimental?.faces?.javaDefinition) {
+      this.definitions ??= vscode.languages.registerDefinitionProvider(JAVA, new Definitions(this.client));
+    }
+    if (experimental?.faces?.javaInlayHints && !this.inlayHints) {
+      const hints = this.hints ?? this.watchInlayHintRefresh();
+      this.inlayHints = vscode.languages.registerInlayHintsProvider(JAVA, hints);
+    }
+  }
+
+  /**
+   * The provider of Java inlay hints, told when faces-ls asks for a refresh. The language client knows only its own
+   * provider, the one of Facelets documents, and takes one handler per request, so this one tells both.
+   */
+  private watchInlayHintRefresh(): InlayHints {
+    const hints = new InlayHints(this.client);
+    this.hints = hints;
+    this.disposables.push(
+      hints.changed,
+      this.client.onRequest(InlayHintRefreshRequest.type, async () => {
+        hints.changed.fire();
+        const feature = this.client.getFeature(InlayHintRequest.method);
+        const told = new Set<unknown>();
+        for (const document of vscode.workspace.textDocuments) {
+          const provider = feature.getProvider(document);
+          if (provider && !told.has(provider)) {
+            told.add(provider);
+            provider.onDidChangeInlayHints.fire();
+          }
+        }
+      }),
+    );
+    return hints;
   }
 
   private register(): void {
@@ -137,6 +224,10 @@ export class JavaProviders implements vscode.Disposable {
   private unregisterReferences(): void {
     this.references?.dispose();
     this.references = undefined;
+    this.definitions?.dispose();
+    this.definitions = undefined;
+    this.inlayHints?.dispose();
+    this.inlayHints = undefined;
   }
 
   dispose(): void {

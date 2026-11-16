@@ -57,7 +57,7 @@ highlighting.
 
 Pass settings as initialization options (as is, or wrapped as `{"settings": {...}}`). `namespaces` and `imports`
 can also be changed with `workspace/didChangeConfiguration` (as is, or under a `faces` or `faces-ls` key);
-`log_file` and `jdt_rendezvous` are read at initialization only.
+`log_file`, `jdt_rendezvous` and `extensions` are read at initialization only.
 
 | Setting | Meaning |
 |---|---|
@@ -65,6 +65,7 @@ can also be changed with `workspace/didChangeConfiguration` (as is, or under a `
 | `imports` | Tags that import a Java class into EL, by namespace URI and tag name, e.g. `{"http://example.org/ui": {"importEnum": "enum"}}`. The tag takes the class in `type` and the EL name in `var` (default: the simple class name). `constants` exposes static fields, `enum` enum constants plus `ALL_VALUES`, `functions` static methods as `var:method(...)`. Built in: `f:importConstants`, `p:importConstants`, `p:importEnum`, `o:importConstants`, `o:importFunctions`. An empty string or `null` removes one. |
 | `log_file` | Write a debug log to this file. |
 | `jdt_rendezvous` | Directory where faces-jdt announces itself, when the jars are not next to each other. |
+| `extensions` | Paths of extension jars, which add support for frameworks on top of Faces (see [architecture.md](architecture.md#extensions)). |
 
 faces-ls also provides call hierarchy (who uses a composite, include or template), references and a code lens
 with usage counts, based on an index of all Facelets files in the workspace folders.
@@ -74,6 +75,11 @@ the `faces/javaStatus` notification. `textDocument/references` on a Java member 
 Facelets files; send it to faces-ls besides jdtls and show both answers. The call hierarchy is jdtls' own (through
 faces-jdt) plus the Facelets files whose EL uses the member; send `textDocument/prepareCallHierarchy` and the
 incoming/outgoing calls for Java documents to faces-ls instead of jdtls.
+
+With extensions, faces-ls provides inlay hints and asks for the settings section of each extension with
+`workspace/configuration`. When its capabilities carry `experimental.faces.javaDefinition` or `javaInlayHints`, an
+extension also answers `textDocument/definition` and `textDocument/inlayHint` for Java documents: send them to
+faces-ls besides jdtls and show both answers.
 
 Code action kinds: `quickfix` (declare an undeclared prefix that is predefined in `namespaces`, add missing
 required attributes) and `source.addMissingImports` (declare all such prefixes), which editors can run on save.

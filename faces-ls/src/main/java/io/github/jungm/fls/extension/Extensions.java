@@ -124,6 +124,23 @@ public final class Extensions {
         }, null);
     }
 
+    /** The commands of all extensions. */
+    public List<String> commands() {
+        List<String> commands = new ArrayList<>();
+        each("commands", extension -> commands.addAll(extension.commands()));
+        return commands;
+    }
+
+    /** The answer of the extension that has the command; null when none has it or it has no answer. */
+    public JsonElement executeCommand(String command, List<JsonElement> arguments) {
+        for (FacesExtension extension : extensions) {
+            if (answer(extension, "commands", FacesExtension::commands, List.<String>of()).contains(command)) {
+                return answer(extension, command, e -> e.executeCommand(command, arguments), null);
+            }
+        }
+        return null;
+    }
+
     /** The first non-empty answer. */
     public List<Location> definition(FaceletsPosition position) {
         for (FacesExtension extension : extensions) {

@@ -314,6 +314,11 @@ final class JdtServer {
             return run("member", () -> queries.member(params), searches, true);
         }
 
+        @Override
+        public CompletableFuture<JsonElement> stringArguments(JsonObject params) {
+            return run("stringArguments", () -> queries.stringArguments(params), searches, true);
+        }
+
         /** Runs a query on {@code pool}; {@code state} marks answers that Java changes can outdate. */
         private CompletableFuture<JsonElement> run(String method, Query query, ExecutorService pool, boolean state) {
             if (!authenticated) {

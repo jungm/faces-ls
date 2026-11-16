@@ -77,6 +77,8 @@ final class JavaModelService implements JavaQueries {
     private final Map<String, JsonElement> typeCache = new ConcurrentHashMap<>();
     private final Path sourcesDir;
     private final Map<String, JsonElement> beanCache = new ConcurrentHashMap<>();
+    /** The string arguments of whole files, by request; dropped when the Java model changes. */
+    private final Map<String, StringArguments.Cached> stringArgumentCache = new ConcurrentHashMap<>();
     /** Increments on {@link #invalidate()}; results computed across an invalidation are not cached. */
     private final AtomicLong generation = new AtomicLong();
     /** Beans found in a library jar, by jar path; kept across source changes until the jar itself changes. */
@@ -95,6 +97,7 @@ final class JavaModelService implements JavaQueries {
         generation.incrementAndGet();
         typeCache.clear();
         beanCache.clear();
+        stringArgumentCache.clear();
     }
 
     @Override
@@ -146,6 +149,12 @@ final class JavaModelService implements JavaQueries {
     @Override
     public JsonElement member(JsonObject params) throws JavaModelException {
         return CallHierarchy.memberAt(params);
+    }
+
+    @Override
+    public JsonElement stringArguments(JsonObject params) throws JavaModelException {
+        long current = generation.get();
+        return StringArguments.find(params, stringArgumentCache, () -> generation.get() == current);
     }
 
     /**
