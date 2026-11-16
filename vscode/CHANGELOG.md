@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 (2026-11-16)
 
 - **Completion for Faces resources**: `library` and `name` of `h:graphicImage`, `h:outputScript`,
   `h:outputStylesheet`, `#{resource['library:name']}` and `f:view contracts` offer the
