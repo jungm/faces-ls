@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.3.0 (2026-11-16)
 
 - **Completion for Faces resources**: `library` and `name` of `h:graphicImage`, `h:outputScript`,
