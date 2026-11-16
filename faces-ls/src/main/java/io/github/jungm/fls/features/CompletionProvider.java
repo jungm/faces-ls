@@ -1,5 +1,7 @@
 package io.github.jungm.fls.features;
 
+import java.net.URI;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -11,6 +13,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.eclipse.lsp4j.Command;
 import org.eclipse.lsp4j.CompletionItem;
 import org.eclipse.lsp4j.CompletionItemKind;
 import org.eclipse.lsp4j.CompletionItemTag;
@@ -36,6 +39,7 @@ import io.github.jungm.fls.index.ViewPaths;
 import io.github.jungm.fls.java.JType;
 import io.github.jungm.fls.java.TypeService;
 import io.github.jungm.fls.project.PropertiesFile;
+import io.github.jungm.fls.project.Resources;
 import io.github.jungm.fls.taglib.Namespaces;
 import io.github.jungm.fls.taglib.TagLibrary;
 import io.github.jungm.fls.taglib.TaglibRegistry;
@@ -378,6 +382,9 @@ public final class CompletionProvider {
 
         Tags.Resolved resolved = Tags.resolve(analyzer.project(), element);
         TagLibrary.AttributeDef definition = resolved.attribute(element, attribute);
+        if (definition != null) {
+            items.addAll(resourceAttributeItems(element, attribute, resolved, prefix, offset));
+        }
         if (definition != null && definition.type() != null
                 && (definition.type().equals("boolean") || definition.type().equals("java.lang.Boolean"))) {
             items.add(valueItem("true", start, offset, CompletionItemKind.Value, null));
@@ -511,7 +518,7 @@ public final class CompletionProvider {
                 Map<String, ElVariable> scope = analyzer.scope(site, offset);
                 ElType type = analyzer.eval(target, scope, null);
                 int keyStart = exprStart + bracket.start(2);
-                return keyItems(type, keyStart, offset);
+                return keyItems(type, bracket.group(2), keyStart, offset);
             }
         }
 
@@ -737,7 +744,7 @@ public final class CompletionProvider {
                     items.add(item);
                 }
             }
-            case ElType.Bundle bundle -> items.addAll(keyItems(bundle, start, offset));
+            case ElType.Bundle bundle -> items.addAll(keyItems(bundle, "", start, offset));
             case ElType.Constants constants -> {
                 for (TypeService.FieldInfo field : analyzer.constants(constants)) {
                     CompletionItemKind kind = field.enumConstant() ? CompletionItemKind.EnumMember : CompletionItemKind.Constant;
@@ -812,8 +819,11 @@ public final class CompletionProvider {
         }
     }
 
-    private List<CompletionItem> keyItems(ElType type, int start, int offset) {
+    private List<CompletionItem> keyItems(ElType type, String typed, int start, int offset) {
         List<CompletionItem> items = new ArrayList<>();
+        if (type instanceof ElType.Java java && analyzer.isResourceHandler(java.type())) {
+            return resourceKeyItems(typed, start, offset);
+        }
         if (type instanceof ElType.Bundle bundle) {
             PropertiesFile file = analyzer.project().bundle(bundle.baseName());
             if (file != null) {
@@ -835,5 +845,99 @@ public final class CompletionProvider {
             }
         }
         return items;
+    }
+
+    // ---------------------------------------------------------------- resources
+
+    /**
+     * Values of attributes that denote resources: libraries and resource names for {@code library} and {@code name}
+     * of a tag that takes a resource (only stylesheets for {@code outputStylesheet}, scripts for
+     * {@code outputScript}), resource library contracts for {@code f:view contracts}.
+     */
+    private List<CompletionItem> resourceAttributeItems(XmlElement element, XmlAttribute attribute, Tags.Resolved resolved,
+            String prefix, int offset) {
+        List<CompletionItem> items = new ArrayList<>();
+        String name = PassthroughElements.componentAttributeName(element, attribute);
+        int start = attribute.valueStart();
+        if (name.equals("library") && resolved.takesResource()) {
+            for (String library : Resources.libraries(analyzer.project())) {
+                items.add(valueItem(library, start, offset, CompletionItemKind.Folder, "resource library"));
+            }
+        } else if (name.equals("name") && resolved.takesResource()) {
+            String library = PassthroughElements.componentAttributeValue(element, "library");
+            if (library != null && !library.isBlank() && ElRegion.literal(library) == null) {
+                return items;
+            }
+            List<String> extensions = switch (resolved.tag().name()) {
+                case "outputStylesheet" -> List.of(".css");
+                case "outputScript" -> List.of(".js", ".mjs");
+                default -> List.of();
+            };
+            for (String resource : Resources.names(analyzer.project(), ElRegion.literal(library))) {
+                if (extensions.isEmpty() || extensions.stream().anyMatch(resource::endsWith)) {
+                    items.add(valueItem(resource, start, offset, CompletionItemKind.File, null));
+                }
+            }
+        } else if (Namespaces.CORE.equals(Namespaces.canonical(resolved.namespace())) && resolved.passthrough() == null
+                && element.localName().equals("view") && name.equals("contracts")) {
+            int itemStart = prefix.lastIndexOf(',') + 1;
+            while (itemStart < prefix.length() && Character.isWhitespace(prefix.charAt(itemStart))) {
+                itemStart++;
+            }
+            Set<String> present = new HashSet<>();
+            for (String contract : attribute.value().split(",")) {
+                present.add(contract.trim());
+            }
+            String typed = prefix.substring(itemStart).trim();
+            for (String contract : Resources.contracts(analyzer.project())) {
+                if (!present.contains(contract) || contract.equals(typed)) {
+                    items.add(valueItem(contract, start + itemStart, offset, CompletionItemKind.Folder, "resource library contract"));
+                }
+            }
+        }
+        return items;
+    }
+
+    /**
+     * Keys of {@code #{resource['library:name']}}: before the colon libraries (accepting one asks for its resources),
+     * {@code this} in composite components and contracts, and resources outside a library; after it the resources of
+     * the library.
+     */
+    private List<CompletionItem> resourceKeyItems(String typed, int start, int offset) {
+        List<CompletionItem> items = new ArrayList<>();
+        int colon = typed.indexOf(':');
+        if (colon >= 0) {
+            String library = typed.substring(0, colon).trim();
+            Set<String> names = library.equals("this") ? Resources.namesFromThis(analyzer.project(), documentPath())
+                    : Resources.names(analyzer.project(), library);
+            for (String name : names) {
+                items.add(valueItem(name, start + colon + 1, offset, CompletionItemKind.File, null));
+            }
+            return items;
+        }
+        Command suggest = new Command("Suggest resources", "editor.action.triggerSuggest");
+        for (String library : Resources.libraries(analyzer.project())) {
+            CompletionItem item = valueItem(library + ":", start, offset, CompletionItemKind.Folder, "resource library");
+            item.setCommand(suggest);
+            items.add(item);
+        }
+        if (Resources.hasThis(analyzer.project(), documentPath())) {
+            CompletionItem item = valueItem("this:", start, offset, CompletionItemKind.Folder,
+                    "the library of this composite component, or this contract");
+            item.setCommand(suggest);
+            items.add(item);
+        }
+        for (String name : Resources.names(analyzer.project(), null)) {
+            items.add(valueItem(name, start, offset, CompletionItemKind.File, null));
+        }
+        return items;
+    }
+
+    private Path documentPath() {
+        try {
+            return Path.of(URI.create(document.uri()));
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 }

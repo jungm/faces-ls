@@ -136,6 +136,154 @@ public final class Resources {
         return List.copyOf(result);
     }
 
+    // ---------------------------------------------------------------- listing
+
+    /**
+     * The libraries resources can be looked up in, for completion: the directories of the resource directories and
+     * of the contracts, also below locale prefixes, as {@link #find} looks them up.
+     */
+    public static Set<String> libraries(ProjectModel project) {
+        Set<String> result = new TreeSet<>();
+        for (Tree root : resourceTrees(project)) {
+            for (String child : root.children("")) {
+                if (!root.isFile(child) && root.isDirectory(child)) {
+                    result.add(child);
+                    if (LOCALE.matcher(child).matches()) {
+                        root.children(child).stream().filter(name -> root.isDirectory(child + "/" + name)).forEach(result::add);
+                    }
+                }
+            }
+        }
+        result.removeIf(name -> !validSegment(name));
+        return result;
+    }
+
+    /**
+     * The names of the resources in a library, for completion: paths below its highest version, versioned resources
+     * ({@code script.js/1_2.js}) by their own name. Outside a library ({@code library} null) the paths below the
+     * resource directories of the project; the resources of jars are only offered in their libraries.
+     */
+    public static Set<String> names(ProjectModel project, String library) {
+        if (library != null && !validSegment(library)) {
+            return Set.of();
+        }
+        Set<String> result = new TreeSet<>();
+        for (Tree root : resourceTrees(project)) {
+            if (library == null) {
+                walk(root, "", "", root instanceof DirectoryTree, true, result);
+            } else {
+                namesIn(root, library, result);
+            }
+        }
+        result.removeIf(name -> !validName(name));
+        return result;
+    }
+
+    /** The names {@code this:name} can take in {@code file}: those of its library or contract (see {@link #findFromThis}). */
+    public static Set<String> namesFromThis(ProjectModel project, Path file) {
+        if (file == null) {
+            return Set.of();
+        }
+        Path absolute = file.toAbsolutePath().normalize();
+        Set<String> result = new TreeSet<>();
+        String library = enclosingDirectory(resourceRoots(project), absolute);
+        if (library != null) {
+            result.addAll(names(project, library));
+        }
+        String contract = enclosingDirectory(contractRoots(project), absolute);
+        if (contract != null) {
+            for (Tree root : contractRoots(project)) {
+                namesIn(root, contract, result);
+            }
+        }
+        result.removeIf(name -> !validName(name));
+        return result;
+    }
+
+    /** Whether {@code this} denotes a library or contract in {@code file}. */
+    public static boolean hasThis(ProjectModel project, Path file) {
+        if (file == null) {
+            return false;
+        }
+        Path absolute = file.toAbsolutePath().normalize();
+        return enclosingDirectory(resourceRoots(project), absolute) != null
+                || enclosingDirectory(contractRoots(project), absolute) != null;
+    }
+
+    /** The resource library contracts of every contracts directory, for completion. */
+    public static Set<String> contracts(ProjectModel project) {
+        Set<String> result = new TreeSet<>();
+        for (Tree root : contractRoots(project)) {
+            for (String child : root.children("")) {
+                if (validSegment(child) && !root.isFile(child) && root.isDirectory(child)) {
+                    result.add(child);
+                }
+            }
+        }
+        return result;
+    }
+
+    /** The resource directories, then every contract as a resource directory of its own. */
+    private static List<Tree> resourceTrees(ProjectModel project) {
+        List<Tree> trees = new ArrayList<>(resourceRoots(project));
+        for (Tree root : contractRoots(project)) {
+            for (String contract : root.children("")) {
+                if (!root.isFile(contract) && root.isDirectory(contract)) {
+                    trees.add(root.sub(contract));
+                }
+            }
+        }
+        return trees;
+    }
+
+    /** The names in a library below one root, without and with a locale prefix, as {@link #resolve} finds them. */
+    private static void namesIn(Tree root, String library, Set<String> result) {
+        libraryNames(root, library, result);
+        for (String child : root.children("")) {
+            if (LOCALE.matcher(child).matches() && !child.equals(library) && root.isDirectory(child)) {
+                libraryNames(root, child + "/" + library, result);
+            }
+        }
+    }
+
+    private static void libraryNames(Tree root, String libraryDir, Set<String> result) {
+        if (!root.isDirectory(libraryDir)) {
+            return;
+        }
+        String version = highest(root.children(libraryDir).stream()
+                .filter(child -> VERSION.matcher(child).matches() && root.isDirectory(libraryDir + "/" + child)));
+        walk(root, libraryDir + "/" + (version == null ? "" : version + "/"), "", true, false, result);
+    }
+
+    private static final int MAX_NAMES = 5000;
+    private static final int MAX_DEPTH = 12;
+
+    /**
+     * Adds the resource names below {@code dir} (empty or ending with '/'), prefixed with {@code relative}. A
+     * directory with versioned files is a versioned resource. Library versions are skipped outside libraries, where
+     * {@code corp/1_0/logo.png} is a resource of the library {@code corp} rather than a name.
+     */
+    private static void walk(Tree root, String dir, String relative, boolean recurse, boolean skipLibraryVersions,
+            Set<String> result) {
+        for (String child : root.children(dir.isEmpty() ? "" : dir.substring(0, dir.length() - 1))) {
+            if (result.size() >= MAX_NAMES) {
+                return;
+            }
+            String path = dir + child;
+            String name = relative + child;
+            if (root.isFile(path)) {
+                result.add(name);
+            } else if (recurse && name.chars().filter(c -> c == '/').count() < MAX_DEPTH && root.isDirectory(path)
+                    && !(skipLibraryVersions && !relative.isEmpty() && VERSION.matcher(child).matches())) {
+                if (root.children(path).stream().anyMatch(c -> RESOURCE_VERSION.matcher(c).matches() && root.isFile(path + "/" + c))) {
+                    result.add(name);
+                } else {
+                    walk(root, path + "/", name + "/", true, skipLibraryVersions, result);
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- roots
 
     /** Where resources are packaged, in the order the runtime looks: web roots before the classpath. */

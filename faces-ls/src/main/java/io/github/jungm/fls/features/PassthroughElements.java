@@ -173,4 +173,15 @@ final class PassthroughElements {
     static String componentAttributeName(XmlElement element, XmlAttribute attribute) {
         return isFacesAttribute(element, attribute) ? attribute.localName() : attribute.name();
     }
+
+    /** The value of the attribute that has the given name on the component (a {@code jsf:} one on passthrough elements). */
+    static String componentAttributeValue(XmlElement element, String componentName) {
+        boolean passthrough = isPassthroughElement(element);
+        for (XmlAttribute candidate : element.attributes()) {
+            if ((!passthrough || isFacesAttribute(element, candidate)) && componentAttributeName(element, candidate).equals(componentName)) {
+                return candidate.value();
+            }
+        }
+        return null;
+    }
 }

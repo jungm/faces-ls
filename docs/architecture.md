@@ -80,7 +80,11 @@ source folders and the classpath is empty.
   them: `resources/` of web roots (or `WEBAPP_RESOURCES_DIRECTORY`), `META-INF/resources/` of source folders,
   classpath directories and jars (extracted), then the same inside every resource library contract (`contracts/`,
   `WEBAPP_CONTRACTS_DIRECTORY`, `META-INF/contracts/`). The highest library and resource version wins; resources
-  are looked up without a locale prefix first, then below each directory named like a locale.
+  are looked up without a locale prefix first, then below each directory named like a locale. The same places
+  feed completion: libraries, the names of a library's highest version (versioned resources by their own name,
+  only `.css` for `outputStylesheet` and `.js` for `outputScript`), outside a library the paths below the
+  project's own resource directories (jar resources are only offered in their libraries), and contracts.
+  `#{resource['` offers `library:` (accepting one asks again, for its names), `this:` and plain names.
 - **Project configuration**: `WEB-INF/faces-config.xml` of web roots, `META-INF/*faces-config.xml` of source
   folders, classpath directories and jars (resource bundles and `<managed-bean>` entries), web.xml context params.
 - **Web roots** (`project/WebRoots.java`): `src/main/webapp`, `WebContent`, `web`, `webapp` and

@@ -36,6 +36,14 @@ final class Tags {
             return tag.attribute(attribute.name());
         }
 
+        /**
+         * Whether the tag takes a Faces resource: it has both {@code name} and {@code library} attributes
+         * ({@code h:graphicImage}, {@code h:outputScript}, {@code h:outputStylesheet} and the like of component libraries).
+         */
+        boolean takesResource() {
+            return tag != null && tag.attribute("name") != null && tag.attribute("library") != null;
+        }
+
         /** The tag's name as written in a page: the element's name, or the target tag of a passthrough element. */
         String tagName(XmlElement element) {
             return passthrough != null ? passthrough.qualifiedName() : element.name();

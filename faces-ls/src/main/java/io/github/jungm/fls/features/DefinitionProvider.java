@@ -247,10 +247,9 @@ public final class DefinitionProvider {
         if (value == null || resolved.tag() == null || resolved.attribute(element, attribute) == null) {
             return null;
         }
-        if ((name.equals("name") || name.equals("library"))
-                && resolved.tag().attribute("name") != null && resolved.tag().attribute("library") != null) {
-            String resourceName = name.equals("name") ? value : ElRegion.literal(componentAttributeValue(element, "name"));
-            String library = name.equals("library") ? value : componentAttributeValue(element, "library");
+        if ((name.equals("name") || name.equals("library")) && resolved.takesResource()) {
+            String resourceName = name.equals("name") ? value : ElRegion.literal(PassthroughElements.componentAttributeValue(element, "name"));
+            String library = name.equals("library") ? value : PassthroughElements.componentAttributeValue(element, "library");
             if (resourceName == null || library != null && ElRegion.literal(library) == null) {
                 return List.of();
             }
@@ -267,18 +266,6 @@ public final class DefinitionProvider {
             String contract = listItemAt(attribute, offset);
             return contract == null ? List.of() : Resources.contract(analyzer.project(), contract).stream()
                     .map(DefinitionProvider::fileStart).toList();
-        }
-        return null;
-    }
-
-    /** The value of the attribute that has the given name on the component (a {@code jsf:} one on passthrough elements). */
-    private static String componentAttributeValue(XmlElement element, String componentName) {
-        boolean passthrough = PassthroughElements.isPassthroughElement(element);
-        for (XmlAttribute candidate : element.attributes()) {
-            if ((!passthrough || PassthroughElements.isFacesAttribute(element, candidate))
-                    && PassthroughElements.componentAttributeName(element, candidate).equals(componentName)) {
-                return candidate.value();
-            }
         }
         return null;
     }
