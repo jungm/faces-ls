@@ -82,6 +82,9 @@ public final class CompletionProvider {
         if (site != null) {
             return completeEl(site, offset);
         }
+        if (!document.markup()) {
+            return List.of();
+        }
         Cursor cursor = Cursor.at(document, offset);
         return switch (cursor.kind()) {
             case TAG_NAME -> completeTags(cursor, offset);

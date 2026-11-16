@@ -65,6 +65,9 @@ public final class DefinitionProvider {
             }
             return result;
         }
+        if (!document.markup()) {
+            return result;
+        }
         Cursor cursor = Cursor.on(document, offset);
         if (cursor.kind() == Cursor.Kind.ATTRIBUTE_VALUE) {
             List<Location> resources = resourceAttribute(cursor.element(), cursor.attribute(), offset);

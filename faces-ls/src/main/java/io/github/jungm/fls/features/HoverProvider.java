@@ -35,6 +35,9 @@ public final class HoverProvider {
         if (site != null) {
             return elHover(site, offset);
         }
+        if (!document.markup()) {
+            return null;
+        }
         Cursor cursor = Cursor.on(document, offset);
         switch (cursor.kind()) {
             case TAG_NAME, CLOSE_TAG_NAME -> {

@@ -76,6 +76,14 @@
       {
         "scopeName": "source.el",
         "path": "./syntaxes/el.tmLanguage.json"
+      },
+      {
+        "scopeName": "source.el.injection",
+        "path": "./syntaxes/el-injection.tmLanguage.json",
+        "injectTo": [
+          "source.css",
+          "source.ini"
+        ]
       }
     ],
     "snippets": [
@@ -159,6 +167,16 @@
           "default": null,
           "scope": "machine-overridable",
           "markdownDescription": "Write a debug log of the language server to this file. Takes effect after a restart."
+        },
+        "faces.elFiles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/resources/**/*.css"
+          ],
+          "markdownDescription": "Glob patterns of further files with EL in them, e.g. `**/*.properties`. The language server completes, checks and explains the EL in these files, like in Facelets pages. The default covers stylesheets served as Faces resources, whose EL Faces evaluates. Takes effect after a restart."
         },
         "faces.namespaces": {
           "type": "object",

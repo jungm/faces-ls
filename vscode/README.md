@@ -31,6 +31,7 @@ by the [Faces Language Server](https://github.com/jungm/faces-ls).
   "[facelets]": { "editor.codeActionsOnSave": { "source.addMissingImports": "explicit" } }
   ```
 - Predefine prefixes for other libraries with `faces.namespaces`, e.g. `{"o": "http://omnifaces.org/ui"}`.
+- EL in other files, e.g. properties files: add their globs to `faces.elFiles`, e.g. `["**/resources/**/*.css", "**/*.properties"]`. Stylesheets served as Faces resources are covered by default.
 - If another extension claims `*.xhtml`, set `"files.associations": { "*.xhtml": "facelets" }`.
 
 ## License

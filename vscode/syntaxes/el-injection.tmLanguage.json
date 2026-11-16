@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Jakarta Expression Language in stylesheets and properties files",
+  "scopeName": "source.el.injection",
+  "comment": "Deferred EL (#{...}) in CSS, which Faces evaluates in stylesheet resources, and in properties files. Immediate ${...} is left alone: there it is mostly a build or framework placeholder.",
+  "injectionSelector": "L:source.css -comment -source.el, L:source.ini -comment -source.el",
+  "patterns": [
+    {
+      "include": "source.el#escape"
+    },
+    {
+      "name": "meta.embedded.expression.el",
+      "begin": "(#\\{)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.section.embedded.begin.el"
+        }
+      },
+      "end": "(\\})|$",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.section.embedded.end.el"
+        }
+      },
+      "contentName": "source.el",
+      "patterns": [
+        {
+          "include": "source.el#inner"
+        }
+      ]
+    }
+  ]
+}

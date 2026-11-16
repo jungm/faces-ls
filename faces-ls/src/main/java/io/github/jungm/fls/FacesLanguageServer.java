@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -140,6 +141,8 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     private final ScheduledExecutorService worker = Executors.newSingleThreadScheduledExecutor(Threads.daemon("faces-ls-worker"));
     private final RequestPool requests = new RequestPool(REQUEST_THREADS);
     private final Map<String, FacesDocument> documents = new ConcurrentHashMap<>();
+    /** The open documents that are no Facelets pages, only text with EL in it, like stylesheets. */
+    private final Set<String> plainDocuments = ConcurrentHashMap.newKeySet();
     private final Map<String, ScheduledFuture<?>> pendingDiagnostics = new ConcurrentHashMap<>();
     /** Per document, the latest diagnostics run; a run that finishes after a later one started does not publish. */
     private final Map<String, Long> diagnosticsRuns = new ConcurrentHashMap<>();
@@ -353,6 +356,9 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     @Override
     public void didOpen(DidOpenTextDocumentParams params) {
         var item = params.getTextDocument();
+        if (!isFacelets(item.getUri(), item.getLanguageId())) {
+            plainDocuments.add(item.getUri());
+        }
         update(item.getUri(), item.getText(), item.getVersion());
     }
 
@@ -372,16 +378,26 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
     private void update(String uri, String text, int version) {
         FacesDocument document;
         try {
-            document = new FacesDocument(uri, text, version);
+            document = new FacesDocument(uri, text, version, !plainDocuments.contains(uri));
         } catch (RuntimeException e) {
             LOG.log(Level.WARNING, "cannot parse " + uri, e);
             return;
         }
         documents.put(uri, document);
         worker.execute(() -> {
-            index.documentChanged(uri, text, document.xml());
+            if (document.markup()) {
+                index.documentChanged(uri, text, document.xml());
+            }
             scheduleDiagnostics(uri, 250);
         });
+    }
+
+    /**
+     * Whether an opened document is a Facelets page. Other documents reach the server because the user configured
+     * them as files with EL in them ({@code faces.elFiles}).
+     */
+    static boolean isFacelets(String uri, String languageId) {
+        return "facelets".equals(languageId) || uri.endsWith(".xhtml");
     }
 
     @Override
@@ -396,13 +412,15 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
             diagnosticsRuns.remove(uri);
             client.publishDiagnostics(new PublishDiagnosticsParams(uri, List.of()));
         }
-        worker.execute(() -> index.documentClosed(uri));
+        if (!plainDocuments.remove(uri)) {
+            worker.execute(() -> index.documentClosed(uri));
+        }
     }
 
     @Override
     public void didSave(DidSaveTextDocumentParams params) {
         FacesDocument document = documents.get(params.getTextDocument().getUri());
-        if (document == null) {
+        if (document == null || !document.markup()) {
             return;
         }
         requests.execute("composite update", () -> {

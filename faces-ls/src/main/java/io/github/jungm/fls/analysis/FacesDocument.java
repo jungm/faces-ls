@@ -18,7 +18,8 @@ import io.github.jungm.fls.xml.XmlElement;
 import io.github.jungm.fls.xml.XmlText;
 
 /**
- * An open Facelets document with its XML tree and every EL expression in it.
+ * An open document with every EL expression in it: a Facelets page with its XML tree, or a plain text file (a
+ * stylesheet, a properties file) whose EL is all there is to it.
  */
 public final class FacesDocument {
 
@@ -37,6 +38,7 @@ public final class FacesDocument {
     private final Path path;
     private final String text;
     private final int version;
+    private final boolean markup;
     private final XmlDocument xml;
     private final LineIndex lines;
     private final List<ElSite> elSites = new ArrayList<>();
@@ -45,13 +47,26 @@ public final class FacesDocument {
     private volatile Optional<TagLibrary.TagDef> compositeInterface;
 
     public FacesDocument(String uri, String text, int version) {
+        this(uri, text, version, true);
+    }
+
+    /**
+     * @param markup false for a file that is no Facelets page but contains EL, e.g. a stylesheet served as a Faces
+     *               resource: it gets no XML tree, and EL anywhere in its text counts
+     */
+    public FacesDocument(String uri, String text, int version, boolean markup) {
         this.uri = uri;
         this.path = toPath(uri);
         this.text = text;
         this.version = version;
-        this.xml = XmlDocument.parse(text);
+        this.markup = markup;
+        this.xml = XmlDocument.parse(markup ? text : "");
         this.lines = new LineIndex(text);
-        collectElSites();
+        if (markup) {
+            collectElSites();
+        } else {
+            collectPlainElSites();
+        }
     }
 
     private static Path toPath(String uri) {
@@ -88,8 +103,44 @@ public final class FacesDocument {
         }
     }
 
+    private void collectPlainElSites() {
+        boolean properties = path.getFileName() != null && path.getFileName().toString().endsWith(".properties");
+        for (ElRegion region : ElRegion.scan(text, 0, text.length())) {
+            if (!(properties && inPropertiesComment(region.start()))) {
+                elSites.add(new ElSite(region, null, null, ElParser.parse(text, region)));
+            }
+        }
+    }
+
+    /** Whether the offset is on a comment line of a properties file, one starting with '#' or '!'. */
+    private boolean inPropertiesComment(int offset) {
+        int lineStart = text.lastIndexOf('\n', offset - 1) + 1;
+        int first = lineStart;
+        while (first < offset && Character.isWhitespace(text.charAt(first))) {
+            first++;
+        }
+        if (first >= text.length() || text.charAt(first) != '#' && text.charAt(first) != '!') {
+            return false;
+        }
+        // a line continuing the value of the line before is no comment, even when it starts with '#'
+        int end = lineStart - 1;
+        if (end > 0 && text.charAt(end - 1) == '\r') {
+            end--;
+        }
+        int backslashes = 0;
+        while (end - 1 - backslashes >= 0 && text.charAt(end - 1 - backslashes) == '\\') {
+            backslashes++;
+        }
+        return backslashes % 2 == 0;
+    }
+
     public String uri() {
         return uri;
+    }
+
+    /** Whether this is a Facelets page rather than a plain text file with EL in it. */
+    public boolean markup() {
+        return markup;
     }
 
     public Path path() {

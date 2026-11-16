@@ -21,7 +21,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand('faces.showOutput', () => output?.show()),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
-      if (event.affectsConfiguration('faces.java.home') || event.affectsConfiguration('faces.server')) {
+      if (
+        event.affectsConfiguration('faces.java.home') ||
+        event.affectsConfiguration('faces.server') ||
+        event.affectsConfiguration('faces.elFiles')
+      ) {
         const restart = 'Restart';
         const choice = await vscode.window.showInformationMessage(
           'The Faces language server needs a restart to apply the changed settings.',
@@ -75,7 +79,11 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: 'file', language: 'facelets' }],
+    documentSelector: [
+      { scheme: 'file', language: 'facelets' },
+      // other files with EL in them; the server tells them from Facelets pages by their language
+      ...(config.get<string[]>('elFiles') ?? []).map((pattern) => ({ scheme: 'file', pattern })),
+    ],
     outputChannel: output,
     initializationOptions: { settings: serverSettings(config) },
     synchronize: {
