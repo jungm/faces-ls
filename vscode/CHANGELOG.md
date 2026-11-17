@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 1.3.1 (2026-11-17)
 
 - **Hover from extensions in Java files**: extensions of the language server can now answer hovers in Java code,
