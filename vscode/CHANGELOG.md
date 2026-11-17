@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Hover from extensions in Java files**: extensions of the language server can now answer hovers in Java code,
+  shown together with the hover of the Java language support. The 1.3.0 notes already listed it; only go to
+  definition and inlay hints reached Java files there.
+
 ## 1.3.0 (2026-11-16)
 
 - **Completion for Faces resources**: `library` and `name` of `h:graphicImage`, `h:outputScript`,

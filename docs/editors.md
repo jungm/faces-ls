@@ -77,9 +77,9 @@ faces-jdt) plus the Facelets files whose EL uses the member; send `textDocument/
 incoming/outgoing calls for Java documents to faces-ls instead of jdtls.
 
 With extensions, faces-ls provides inlay hints and asks for the settings section of each extension with
-`workspace/configuration`. When its capabilities carry `experimental.faces.javaDefinition` or `javaInlayHints`, an
-extension also answers `textDocument/definition` and `textDocument/inlayHint` for Java documents: send them to
-faces-ls besides jdtls and show both answers.
+`workspace/configuration`. When its capabilities carry `experimental.faces.javaDefinition`, `javaHover` or
+`javaInlayHints`, an extension also answers `textDocument/definition`, `textDocument/hover` and
+`textDocument/inlayHint` for Java documents: send them to faces-ls besides jdtls and show both answers.
 
 Code action kinds: `quickfix` (declare an undeclared prefix that is predefined in `namespaces`, add missing
 required attributes) and `source.addMissingImports` (declare all such prefixes), which editors can run on save.

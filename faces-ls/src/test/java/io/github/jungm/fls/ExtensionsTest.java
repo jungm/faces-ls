@@ -26,6 +26,7 @@ import org.eclipse.lsp4j.DidOpenTextDocumentParams;
 import org.eclipse.lsp4j.ExecuteCommandParams;
 import org.eclipse.lsp4j.FileChangeType;
 import org.eclipse.lsp4j.FileEvent;
+import org.eclipse.lsp4j.Hover;
 import org.eclipse.lsp4j.HoverParams;
 import org.eclipse.lsp4j.InitializeParams;
 import org.eclipse.lsp4j.InitializeResult;
@@ -160,6 +161,10 @@ class ExtensionsTest {
                 .get(10, TimeUnit.SECONDS).getLeft();
     }
 
+    private Hover hover(String uri, int line, int character) throws Exception {
+        return server.hover(new HoverParams(new TextDocumentIdentifier(uri), new Position(line, character))).get(10, TimeUnit.SECONDS);
+    }
+
     private List<InlayHint> inlayHints(String uri) throws Exception {
         return server.inlayHint(new InlayHintParams(new TextDocumentIdentifier(uri),
                 new Range(new Position(0, 0), new Position(100, 0)))).get(10, TimeUnit.SECONDS);
@@ -187,13 +192,13 @@ class ExtensionsTest {
         assertEquals(Boolean.TRUE, result.getCapabilities().getInlayHintProvider().getLeft());
         JsonObject faces = ((JsonObject) result.getCapabilities().getExperimental()).getAsJsonObject("faces");
         assertTrue(faces.get("javaDefinition").getAsBoolean());
+        assertTrue(faces.get("javaHover").getAsBoolean());
         assertTrue(faces.get("javaInlayHints").getAsBoolean());
 
         String uri = page();
         List<? extends Location> locations = definition(uri, 1, 30);
         assertEquals(List.of("file:///extension.properties"), locations.stream().map(Location::getUri).toList());
-        assertEquals("from the **extension**", server.hover(new HoverParams(new TextDocumentIdentifier(uri), new Position(1, 30)))
-                .get(10, TimeUnit.SECONDS).getContents().getRight().getValue());
+        assertEquals("from the **extension**", hover(uri, 1, 30).getContents().getRight().getValue());
         // EL the extension does not know is left to faces-ls
         assertTrue(definition(uri, 2, 27).isEmpty());
         assertEquals(List.of("hint", "hint"), inlayHints(uri).stream().map(hint -> hint.getLabel().getLeft()).toList());
@@ -263,8 +268,10 @@ class ExtensionsTest {
             List<InlayHint> hints = inlayHints(uri);
             assertEquals(List.of("get:a.key"), hints.stream().map(hint -> hint.getLabel().getLeft()).toList());
             assertEquals(new Position(3, 11), hints.get(0).getPosition());
+            assertEquals("key **a.key**", hover(uri, 3, 6).getContents().getRight().getValue());
             // library classes have no project
             assertTrue(definition("jdt://contents/a.jar/a/Bean.class", 3, 6).isEmpty());
+            assertNull(hover("jdt://contents/a.jar/a/Bean.class", 3, 6));
         }
     }
 }

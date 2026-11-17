@@ -4,6 +4,7 @@ import {
   CallHierarchyOutgoingCallsRequest,
   CallHierarchyPrepareRequest,
   DefinitionRequest,
+  HoverRequest,
   InlayHintRefreshRequest,
   InlayHintRequest,
   LanguageClient,
@@ -85,6 +86,21 @@ class Definitions implements vscode.DefinitionProvider {
   }
 }
 
+/** What extensions of faces-ls say about a position in Java code, e.g. the values of a message key; VS Code shows it with jdtls' hover. */
+class Hovers implements vscode.HoverProvider {
+  constructor(private readonly client: LanguageClient) {}
+
+  async provideHover(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.Hover | undefined> {
+    const params = this.client.code2ProtocolConverter.asTextDocumentPositionParams(document, position);
+    const hover = await this.client.sendRequest(HoverRequest.type, params, token);
+    return this.client.protocol2CodeConverter.asHover(hover);
+  }
+}
+
 /** The inlay hints of extensions of faces-ls in Java code; VS Code adds them to jdtls' hints. */
 class InlayHints implements vscode.InlayHintsProvider {
   readonly changed = new vscode.EventEmitter<void>();
@@ -109,6 +125,7 @@ class InlayHints implements vscode.InlayHintsProvider {
 /** What faces-ls announces under `experimental.faces` when one of its extensions answers requests on Java documents. */
 interface JavaCapabilities {
   javaDefinition?: boolean;
+  javaHover?: boolean;
   javaInlayHints?: boolean;
 }
 
@@ -119,13 +136,14 @@ interface JavaCapabilities {
  * ones, so that provider is registered again when a Java editor becomes active, so that it is the newest one even
  * after jdtls registered its providers anew.
  *
- * When an extension of faces-ls takes Java documents, definitions and inlay hints are registered alongside.
+ * When an extension of faces-ls takes Java documents, definitions, hovers and inlay hints are registered alongside.
  */
 export class JavaProviders implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[] = [];
   private registration: vscode.Disposable | undefined;
   private references: vscode.Disposable | undefined;
   private definitions: vscode.Disposable | undefined;
+  private hovers: vscode.Disposable | undefined;
   private inlayHints: vscode.Disposable | undefined;
   private hints: InlayHints | undefined;
   private connected = false;
@@ -180,6 +198,9 @@ export class JavaProviders implements vscode.Disposable {
     if (experimental?.faces?.javaDefinition) {
       this.definitions ??= vscode.languages.registerDefinitionProvider(JAVA, new Definitions(this.client));
     }
+    if (experimental?.faces?.javaHover) {
+      this.hovers ??= vscode.languages.registerHoverProvider(JAVA, new Hovers(this.client));
+    }
     if (experimental?.faces?.javaInlayHints && !this.inlayHints) {
       const hints = this.hints ?? this.watchInlayHintRefresh();
       this.inlayHints = vscode.languages.registerInlayHintsProvider(JAVA, hints);
@@ -226,6 +247,8 @@ export class JavaProviders implements vscode.Disposable {
     this.references = undefined;
     this.definitions?.dispose();
     this.definitions = undefined;
+    this.hovers?.dispose();
+    this.hovers = undefined;
     this.inlayHints?.dispose();
     this.inlayHints = undefined;
   }

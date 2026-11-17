@@ -204,7 +204,7 @@ promise, so an extension is built for the faces-ls it runs in.
 |---|---|
 | `definition`, `hover` | Asked before faces-ls for a position in a Facelets document; a non-empty answer replaces that of faces-ls |
 | `inlayHints` | The only inlay hints there are; `inlayHintProvider` is announced when an extension is loaded |
-| `javaDefinition`, `javaInlayHints` | For Java documents, when the extension says `supportsJava`. faces-ls has no text of Java documents; `ExtensionHost.stringArguments` asks faces-jdt for the string arguments of method calls |
+| `javaDefinition`, `javaHover`, `javaInlayHints` | For Java documents, when the extension says `supportsJava`. faces-ls has no text of Java documents; `ExtensionHost.stringArguments` asks faces-jdt for the string arguments of method calls |
 | `configurationSection`, `configure` | faces-ls asks the client for that section (`workspace/configuration`) after `initialized` and after every `workspace/didChangeConfiguration` |
 | `commands`, `executeCommand` | Announced as `workspace/executeCommand` commands, for what no LSP request carries: the editor side of an extension calls them and renders the answer. `ExtensionHost` gives the analyzer of an open or indexed document, the Facelets index and the project of a file |
 | `watchedFiles`, `filesChanged` | Glob patterns added to the file watchers; every change of a watched file outside build directories is passed on |
@@ -212,10 +212,10 @@ promise, so an extension is built for the faces-ls it runs in.
 `ExtensionHost.refreshInlayHints` sends `workspace/inlayHint/refresh`; faces-ls sends it too when beans, types or
 watched files change. An extension that throws is logged and counts as having no answer.
 
-With an extension that supports Java, the capabilities carry `experimental.faces.javaDefinition` and
-`javaInlayHints`: clients may then send `textDocument/definition` and `textDocument/inlayHint` for Java documents
-to faces-ls as well and add the answers to those of jdtls. The VS Code extension registers providers for both
-while faces-jdt is connected. It finds extension jars in `faces.server.extensions` and in the `package.json` of
+With an extension that supports Java, the capabilities carry `experimental.faces.javaDefinition`, `javaHover` and
+`javaInlayHints`: clients may then send `textDocument/definition`, `textDocument/hover` and `textDocument/inlayHint`
+for Java documents to faces-ls as well and add the answers to those of jdtls. The VS Code extension registers
+providers for them while faces-jdt is connected. It finds extension jars in `faces.server.extensions` and in the `package.json` of
 other VS Code extensions, as `contributes.facesExtensions`: each entry the path of a jar, or
 `{"jar": "...", "configuration": "section"}` with the settings section the server extension reads, which the client
 then reports changes of.

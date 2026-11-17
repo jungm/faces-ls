@@ -116,6 +116,12 @@ public final class RecordingExtension implements FacesExtension {
     }
 
     @Override
+    public String javaHover(JavaPosition position) {
+        return host.stringArguments(position.uri(), position.position(), List.of("a.Messages")).stream()
+                .map(argument -> "key **" + argument.value() + "**").findFirst().orElse(null);
+    }
+
+    @Override
     public List<InlayHint> javaInlayHints(JavaRange range) {
         List<StringArgument> arguments = host.stringArguments(range.uri(), null, List.of("a.Messages"));
         return arguments.stream()

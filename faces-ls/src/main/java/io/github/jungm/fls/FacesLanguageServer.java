@@ -231,6 +231,7 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
         if (extensions.supportsJava()) {
             JsonObject faces = new JsonObject();
             faces.addProperty("javaDefinition", true);
+            faces.addProperty("javaHover", true);
             faces.addProperty("javaInlayHints", true);
             JsonObject experimental = new JsonObject();
             experimental.add("faces", faces);
@@ -699,6 +700,14 @@ public final class FacesLanguageServer implements LanguageServer, LanguageClient
 
     @Override
     public CompletableFuture<Hover> hover(HoverParams params) {
+        if (isJava(params.getTextDocument().getUri())) {
+            return onJava("hover", null, cancel -> {
+                ProjectModel project = javaProject(params.getTextDocument().getUri());
+                String markdown = project == null ? null : extensions.javaHover(
+                        new JavaPosition(params.getTextDocument().getUri(), params.getPosition(), project));
+                return markdown == null ? null : new Hover(new MarkupContent(MarkupKind.MARKDOWN, markdown));
+            });
+        }
         return onDocument("hover", params.getTextDocument().getUri(), null, (document, analyzer, current) -> {
             LOG.fine(() -> "hover at " + params.getPosition().getLine() + ":" + params.getPosition().getCharacter());
             int offset = document.lines().offset(params.getPosition());

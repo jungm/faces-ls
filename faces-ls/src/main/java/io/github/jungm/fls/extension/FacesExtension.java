@@ -83,9 +83,9 @@ public interface FacesExtension {
     }
 
     /**
-     * Whether the extension answers {@link #javaDefinition} and {@link #javaInlayHints}. faces-ls then announces in
-     * its capabilities ({@code experimental.faces.javaDefinition}, {@code experimental.faces.javaInlayHints}) that
-     * clients may send it those requests for Java documents too.
+     * Whether the extension answers {@link #javaDefinition}, {@link #javaHover} and {@link #javaInlayHints}. faces-ls
+     * then announces in its capabilities ({@code experimental.faces.javaDefinition}, {@code javaHover} and
+     * {@code javaInlayHints}) that clients may send it those requests for Java documents too.
      */
     default boolean supportsJava() {
         return false;
@@ -94,6 +94,11 @@ public interface FacesExtension {
     /** The definitions of what is at a position of a Java document. Editors add them to those of jdtls. */
     default List<Location> javaDefinition(JavaPosition position) {
         return List.of();
+    }
+
+    /** Markdown for a hover at a position of a Java document, or null. Editors add it to the hover of jdtls. */
+    default String javaHover(JavaPosition position) {
+        return null;
     }
 
     /** Inlay hints of a range of a Java document. Editors add them to those of jdtls. */

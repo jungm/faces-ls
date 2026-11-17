@@ -171,6 +171,18 @@ public final class Extensions {
         return all("javaDefinition", extension -> extension.supportsJava() ? extension.javaDefinition(position) : List.of());
     }
 
+    /** The answers of all extensions, one below the other; null without any. */
+    public String javaHover(JavaPosition position) {
+        List<String> answers = new ArrayList<>();
+        for (FacesExtension extension : extensions) {
+            String markdown = answer(extension, "javaHover", e -> e.supportsJava() ? e.javaHover(position) : null, null);
+            if (markdown != null && !markdown.isBlank()) {
+                answers.add(markdown.strip());
+            }
+        }
+        return answers.isEmpty() ? null : String.join("\n\n---\n\n", answers);
+    }
+
     public List<InlayHint> javaInlayHints(JavaRange range) {
         return all("javaInlayHints", extension -> extension.supportsJava() ? extension.javaInlayHints(range) : List.of());
     }
